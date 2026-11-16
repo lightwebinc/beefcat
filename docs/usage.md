@@ -15,6 +15,7 @@ beefcat init                       create the sender's home and identity
 beefcat fund                       mine postage: funding outputs for carriers
 beefcat status                     the home: identity, pool, postage left
 beefcat sweep                      spend funding outputs: retract what they carried
+beefcat withdraw                   pay coin out of the pool, to an address or an identity key
 beefcat version
 ```
 
@@ -130,6 +131,37 @@ nothing.
 A retraction reaches only receivers that look. A receiver that verified
 the data before the sweep, or that does not use `-unspent`, still has it.
 
+### withdraw
+
+```text
+beefcat withdraw [-sats N] [-messagebox URL] -yes TO
+beefcat withdraw -redeliver TXID
+```
+
+Pays coin out of the home's pool. Without `-sats` it pays the pool's
+largest coin whole, less the miner fee. Funding outputs already minted are
+postage, not coin, and are not withdrawn. Without `-yes` it prints what it
+would do and spends nothing.
+
+| TO | Payment |
+| --- | --- |
+| an address | a plain payment to it |
+| an identity key (66 hex characters), with `-messagebox URL` | a BRC-29 payment: locked to a key derived for this one payment, which only that identity's wallet can spend |
+| `peerpay:KEY?url=URL` | the same, with the message box taken from the link |
+
+A wallet cannot see a BRC-29 payment until it is told the derivation, so
+beefcat hands the recipient a PeerPay notice: the payment with its proofs
+and the derivation, encrypted to the recipient, put in its
+`payment_inbox` at the message box server over an authenticated
+connection (BRC-103). A wallet that speaks PeerPay lists it as an
+incoming payment.
+
+The notice is written to `payments/<txid>.json` in the home before the
+payment is broadcast. If the message box does not take it, beefcat says so
+loudly and exits nonzero; the payment is made and nothing is lost.
+`-redeliver TXID` sends the kept notice again and spends nothing. A message
+box that charges for delivery is refused, not paid.
+
 ## Sources
 
 | Setting | Flag | Default on main and test | What it is |
@@ -153,7 +185,8 @@ a reasonable start; your own block-headers-service or node is better.
 | send | the far end only |
 | receive, `verify` | the far end; the header source, at most once per carrier |
 | receive with `-unspent` | also the chain view, once per carrier |
-| `fund`, `sweep` | the header source, the chain view and the settlement leg |
+| `fund`, `sweep`, `withdraw` | the header source, the chain view and the settlement leg |
+| `withdraw` to an identity key | also the recipient's message box server |
 | `init`, `status` | nothing |
 
 ## Costs

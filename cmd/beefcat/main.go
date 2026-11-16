@@ -47,6 +47,7 @@ const usageText = `beefcat: netcat for the BEEF data carrier, with SPV
   beefcat fund                       mine postage: funding outputs for carriers
   beefcat status                     the home: identity, pool, postage left
   beefcat sweep                      spend funding outputs: retract what they carried
+  beefcat withdraw                   pay coin out of the pool, to an address or an identity key
   beefcat version
 
 Every chunk of data rides one carrier: a transaction that can never be
@@ -260,6 +261,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr *os
 		err = cmdStatus(ctx, g, args[1:])
 	case "sweep":
 		err = cmdSweep(ctx, g, args[1:])
+	case "withdraw":
+		err = cmdWithdraw(ctx, g, args[1:])
 	case "verify":
 		code, err = cmdVerify(ctx, g, args[1:])
 	default:

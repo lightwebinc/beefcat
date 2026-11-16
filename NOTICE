@@ -25,7 +25,11 @@ Third-Party Standards
   BRC-67:  Simplified Payment Verification
   BRC-74:  BSV Unified Merkle Path
   BRC-95:  Atomic BEEF
+  BRC-29:  Simple Authenticated BSV P2PKH Payment Protocol
+  BRC-33:  PeerServ Message Relay Interface
   BRC-100: Wallet-to-Application Interface
+  BRC-103: Peer-to-Peer Mutual Authentication and Certificate Exchange Protocol
+  BRC-104: HTTP Transport for BRC-103 Mutual Authentication
   BSV Blockchain Standards Repository
   https://github.com/bsv-blockchain/BRCs/
 
@@ -55,6 +59,7 @@ this notice does not modify those licenses.
   github.com/stretchr/testify                  MIT License
   go.yaml.in/yaml/v3                           MIT License, Apache License 2.0
   golang.org/x/crypto                          BSD License
+  golang.org/x/net                             BSD License
 
 Three DIRECT dependencies, github.com/bsv-blockchain/go-sdk,
 github.com/lightwebinc/bcommon and github.com/lightwebinc/bcommon/devkit,

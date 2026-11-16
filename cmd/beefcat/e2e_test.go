@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http/httptest"
@@ -14,16 +18,23 @@ import (
 	"testing"
 	"time"
 
+	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
+	"github.com/bsv-blockchain/go-sdk/spv"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh"
+	"github.com/bsv-blockchain/go-sdk/wallet"
 
+	"github.com/lightwebinc/bcommon/bwallet"
 	"github.com/lightwebinc/bcommon/carrier"
 	"github.com/lightwebinc/bcommon/funding"
 	"github.com/lightwebinc/bcommon/guard"
+	"github.com/lightwebinc/bcommon/headers"
 	"github.com/lightwebinc/bcommon/mint"
 	"github.com/lightwebinc/bcommon/testchain"
 
 	"github.com/lightwebinc/beefcat/internal/home"
+	"github.com/lightwebinc/beefcat/internal/peerpay"
 	"github.com/lightwebinc/beefcat/send"
 	"github.com/lightwebinc/beefcat/wire"
 )
@@ -824,5 +835,177 @@ func TestSaveDoesNotOverwrite(t *testing.T) {
 	code, _, e := r.verify(r.stream([]byte("new")), "-k", r.key, "-save", f)
 	if got, _ := os.ReadFile(f); code != exitUsage || string(got) != "old" {
 		t.Fatalf("%d %q\n%s", code, got, e)
+	}
+}
+
+func TestWithdrawToAddress(t *testing.T) {
+	r := newRig(t, 1)
+	key, err := ec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, err := script.NewAddressFromPublicKey(key.PubKey(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Nothing is spent without -yes.
+	code, o, e := cat(t, nil, "withdraw", "-home", r.home, "-sats", "5000", addr.AddressString)
+	if code != 0 || !strings.Contains(string(o), "nothing was spent") {
+		t.Fatalf("without -yes: %d\n%s%s", code, o, e)
+	}
+	code, o, e = cat(t, nil, "withdraw", "-home", r.home, "-sats", "5000", "-yes", addr.AddressString)
+	if code != 0 || !strings.Contains(string(o), "mined at height") {
+		t.Fatalf("withdraw: %d\n%s%s", code, o, e)
+	}
+	txid := strings.Fields(string(o)[strings.Index(string(o), "txid"):])[1]
+	tx := r.chain.Tx(txid)
+	want, _ := p2pkh.Lock(addr)
+	if tx == nil || tx.Outputs[0].Satoshis != 5000 || !tx.Outputs[0].LockingScript.Equals(want) {
+		t.Fatalf("the chain holds no payment of 5000 sat to %s in %s", addr.AddressString, txid)
+	}
+	// A mainnet address is refused on another network, and garbage is refused.
+	for _, to := range []string{"1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", "not-an-address"} {
+		if code, _, _ := cat(t, nil, "withdraw", "-home", r.home, "-yes", to); code != exitUsage {
+			t.Fatalf("withdraw to %q: exit %d", to, code)
+		}
+	}
+}
+
+// A payment to an identity key is one only that key's wallet can find and
+// spend, and what reaches its inbox is what PeerPay reads: the token,
+// encrypted to the recipient, under an id that is an HMAC of it.
+func TestWithdrawToIdentityKey(t *testing.T) {
+	r := newRig(t, 1)
+	ctx := context.Background()
+	rk, err := ec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient, err := wallet.NewProtoWallet(wallet.ProtoWalletArgs{Type: wallet.ProtoWalletArgsTypePrivateKey, PrivateKey: rk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rhex := hex.EncodeToString(rk.PubKey().Compressed())
+	var got []peerpay.Message
+	var boxes []string
+	fail := true
+	old := deliver
+	deliver = func(_ context.Context, box string, _ wallet.Interface, m peerpay.Message) error {
+		if fail {
+			return errors.New("the box is down")
+		}
+		got, boxes = append(got, m), append(boxes, box)
+		return nil
+	}
+	defer func() { deliver = old }()
+
+	// No message box: refused before anything is spent.
+	if code, _, _ := cat(t, nil, "withdraw", "-home", r.home, "-yes", rhex); code != exitUsage {
+		t.Fatalf("an identity key with no message box: exit %d", code)
+	}
+	// The box is down: the payment is made, loudly not delivered, and kept.
+	link := "peerpay:" + rhex + "?url=https%3A%2F%2Fbox.example.com"
+	code, o, e := cat(t, nil, "withdraw", "-home", r.home, "-sats", "4000", "-yes", link)
+	if code == 0 || !strings.Contains(e, "THE PAYMENT IS MADE BUT NOT DELIVERED") {
+		t.Fatalf("a failed delivery: %d\n%s%s", code, o, e)
+	}
+	txid := strings.Fields(string(o)[strings.Index(string(o), "txid"):])[1]
+	if !strings.Contains(e, "beefcat withdraw -redeliver") || !strings.Contains(e, txid) {
+		t.Fatalf("the failure does not say how to deliver again:\n%s", e)
+	}
+	fail = false
+	if code, o, e := cat(t, nil, "withdraw", "-home", r.home, "-redeliver", txid); code != 0 || len(got) != 1 {
+		t.Fatalf("redeliver: %d, %d message(s)\n%s%s", code, len(got), o, e)
+	}
+	m := got[0]
+	if boxes[0] != "https://box.example.com" || m.Recipient != rhex {
+		t.Fatalf("delivered to %s for %s", boxes[0], m.Recipient)
+	}
+
+	// The recipient opens it with nothing but its own key and the sender's
+	// identity, which the message box supplies.
+	sender, err := bwallet.Counterparty(r.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := wallet.EncryptionArgs{ProtocolID: peerpay.Protocol, KeyID: "1", Counterparty: sender}
+	var body struct {
+		EncryptedMessage string `json:"encryptedMessage"`
+	}
+	if err := json.Unmarshal([]byte(m.Body), &body); err != nil || body.EncryptedMessage == "" {
+		t.Fatalf("body %q: %v", m.Body, err)
+	}
+	ct, err := base64.StdEncoding.DecodeString(body.EncryptedMessage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := recipient.Decrypt(ctx, wallet.DecryptArgs{EncryptionArgs: args, Ciphertext: ct}, "test")
+	if err != nil {
+		t.Fatalf("the recipient cannot decrypt its payment: %v", err)
+	}
+	mac, err := recipient.CreateHMAC(ctx, wallet.CreateHMACArgs{EncryptionArgs: args, Data: peerpay.IDInput(plain.Plaintext)}, "test")
+	if err != nil || hex.EncodeToString(mac.HMAC[:]) != m.ID {
+		t.Fatalf("the message id is not the HMAC of the token: %v", err)
+	}
+	if in := peerpay.IDInput([]byte(`{"a":"b"}`)); string(in) != `"{\"a\":\"b\"}"` {
+		t.Fatalf("the id's input is %s", in)
+	}
+	// The token is PeerPay's: the transaction a JSON array of numbers.
+	if !bytes.Contains(plain.Plaintext, []byte(`"transaction":[1,1,1,1,`)) {
+		t.Fatalf("the transaction is not a byte array of Atomic BEEF: %.80s", plain.Plaintext)
+	}
+	var tok peerpay.Token
+	if err := json.Unmarshal(plain.Plaintext, &tok); err != nil {
+		t.Fatal(err)
+	}
+	beef := make([]byte, len(tok.Transaction))
+	for i, v := range tok.Transaction {
+		beef[i] = byte(v)
+	}
+	_, tx, id, err := guard.ParseBEEF(beef, guard.DefaultBound)
+	if err != nil || id.String() != txid || tok.Amount != 4000 || tx.Outputs[0].Satoshis != 4000 {
+		t.Fatalf("token: txid %v, amount %d: %v", id, tok.Amount, err)
+	}
+	// Output 0 pays the key the recipient derives under BRC-29.
+	forSelf := true
+	pk, err := recipient.GetPublicKey(ctx, wallet.GetPublicKeyArgs{
+		EncryptionArgs: wallet.EncryptionArgs{ProtocolID: bwallet.PaymentProtocol,
+			KeyID: bwallet.PaymentKeyID(tok.CustomInstructions.DerivationPrefix, tok.CustomInstructions.DerivationSuffix), Counterparty: sender},
+		ForSelf: &forSelf,
+	}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, _ := script.NewAddressFromPublicKey(pk.PublicKey, false)
+	want, _ := p2pkh.Lock(addr)
+	if !tx.Outputs[0].LockingScript.Equals(want) {
+		t.Fatal("output 0 is not locked to the key the recipient derives")
+	}
+	// And the payment proves itself: scripts, amounts and its parent's proof.
+	hc, err := headers.NewSource(r.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := spv.Verify(ctx, tx, hc, nil); !ok || err != nil {
+		t.Fatalf("the payment does not verify: %v", err)
+	}
+	if r.chain.Tx(txid) == nil {
+		t.Fatal("the payment is not on the chain")
+	}
+}
+
+func TestPeerPayLink(t *testing.T) {
+	const key = "021d3359056f4f923a42b2b026a8fc2856b05320ee68f10233f9b8cbe76b14f8d2"
+	k, box, err := peerpay.ParseURI("peerpay:" + key + "?url=https%3A%2F%2Fmessagebox.example.com")
+	if err != nil || k != key || box != "https://messagebox.example.com" {
+		t.Fatalf("%q %q %v", k, box, err)
+	}
+	if k, box, err := peerpay.ParseURI("peerpay:" + key); err != nil || k != key || box != "" {
+		t.Fatalf("a link with no box: %q %q %v", k, box, err)
+	}
+	for _, bad := range []string{"peerpay:xyz", key, "peerpay:" + key + "?url=http%3A%2F%2Fplain.example.com", "peerpay:" + key + "?url=ftp%3A%2F%2Fx"} {
+		if _, _, err := peerpay.ParseURI(bad); err == nil {
+			t.Fatalf("%q was accepted", bad)
+		}
 	}
 }
