@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,6 +26,19 @@ import (
 )
 
 var version = "dev"
+
+// buildVersion is the version a release build was stamped with, or else the
+// module version the Go toolchain recorded, which is what "go install
+// ...@v0.1.0" leaves.
+func buildVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return strings.TrimPrefix(bi.Main.Version, "v")
+	}
+	return version
+}
 
 // Exit statuses. A refusal is never reported as an error, and an error is
 // never reported as a refusal: an outage is not a forgery.
@@ -251,7 +265,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr *os
 		fmt.Fprint(stdout, usageText)
 		return exitOK
 	case "version", "-version", "--version":
-		fmt.Fprintln(stdout, "beefcat", version)
+		fmt.Fprintln(stdout, "beefcat", buildVersion())
 		return exitOK
 	case "init":
 		err = cmdInit(ctx, g, args[1:])
