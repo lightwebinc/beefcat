@@ -111,6 +111,11 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 		if *box != "" {
 			n.MessageBox = *box
 		}
+		// The notice's box, or the one given now, is held to the same rule
+		// as a new withdrawal's: nothing goes to a message box in the clear.
+		if err := peerpay.CheckBox(n.MessageBox); err != nil {
+			return usage("%v", err)
+		}
 		return g.deliverNotice(ctx, sg, n, path)
 	}
 	if len(pos) != 1 {

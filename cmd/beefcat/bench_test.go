@@ -15,10 +15,9 @@ import (
 // what it measures is the verifier: no network and no disk. One worker is
 // the cost of a carrier on one core; the default is what a host gives.
 func BenchmarkReceive(b *testing.B) {
-	t := &testing.T{}
 	const carriers = 32
 	_, url := benchChain(b)
-	r := &rig{t: t, url: url}
+	r := &rig{t: b, url: url}
 	r.home = r.newHome(carriers)
 	stream := r.stream(random(carriers << 22))
 	hc, err := headers.NewSource(url)

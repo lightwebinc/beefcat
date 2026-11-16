@@ -13,9 +13,11 @@ netcat for the BEEF data carrier, with SPV.
 
 Any bytes in, sent to an address and port, and the far end proves three
 things about them before it writes one: the bytes are exactly what was
-sent, a named key signed them, and that key paid mined postage on the BSV
-blockchain to send them. The proof travels with the data. The receiver
-needs nothing but block headers, from a source it chooses.
+sent, a named key signed them, and that key had postage mined on the BSV
+blockchain. The proof travels with the data. The receiver
+needs nothing but block headers, from a source it chooses, and the proof
+is as strong as that source: see
+[how far the header check goes](docs/verification.md#how-far-the-header-check-goes).
 
 ```console
 receiver$ beefcat -l 9000 -k 03c1873f...9911c982 > received.bin
@@ -36,7 +38,20 @@ The data is never mined. Each chunk rides a **carrier**: a signed
 transaction built so that it cannot be mined, spending one output of a
 transaction that was. That mined output is the postage; the carrier and
 its Merkle path, in one [BEEF](https://github.com/bsv-blockchain/BRCs/blob/master/transactions/0062.md)
-envelope, are the proof. Postage for a gigabyte costs about 1,800 satoshis in miner fees.
+envelope, are the proof.
+
+Postage is a setup cost, not a fee per message. beefcat spends one funded
+output per carrier and never spends one twice, and enough of them for a
+gigabyte costs about 1,800 satoshis in miner fees. But a carrier is never
+mined, so nothing on the chain records that an output was used: the same
+stream can go to any number of receivers at no further cost, and a
+receiver, which keeps no memory, cannot tell an output that backed an
+earlier stream. What the proof shows is that the sender's key paid to
+exist on the chain, not what any one message cost.
+
+The proof is of a transaction that was mined, not of outputs that are
+still unspent. A sender retracts by spending them, and a receiver sees
+that only if it asks: `-unspent`.
 
 ## It is loud when it should be
 
