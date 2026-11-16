@@ -137,11 +137,14 @@ print. Get it from the sender over a channel you already trust.
    stream, but can hand you an older complete stream from the same
    sender in its place, and it verifies. If freshness matters, put it in
    the data: a date, a counter, a challenge you chose.
-5. **That the postage was not used before.** Within a stream, one
-   funding output pays for one carrier, and a second use is refused. A
-   receiver keeps no memory between streams, so it cannot see an output
-   used again in a later stream. Each stream still needs as many mined
-   outputs of the sender's as it has carriers.
+5. **What this message cost.** Postage is a setup cost. Within a stream,
+   one funding output backs one carrier, and a second use is refused, so
+   a stream needs as many mined outputs of the sender's as it has
+   carriers. But a carrier is never mined, so the chain does not record
+   an output as used: the same stream can be sent to many receivers, and
+   a receiver, which keeps no memory between streams, cannot see an
+   output that backed an earlier one. The proof says the sender's key
+   paid to exist on the chain, not that it paid for this delivery.
 6. **Anything about secrecy.** The data is signed, not encrypted. Anyone
    on the path can read it.
 

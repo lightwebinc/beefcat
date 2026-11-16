@@ -39,11 +39,14 @@ there. A receiver learns the sender's identity key from a verified
 stream, and an identity key is payable with no further exchange (BRC-29
 derives a payment destination from it).
 
-Postage puts a mined cost behind every stream: a stream of n carriers
-needs n mined outputs of the sender's own, and a receiver checks that
-from headers alone. A receiver that keeps no memory cannot see one output
-used again in a later stream; noticing that takes an index of what was
-seen, which is a host's job and a seam here.
+Postage puts a mined cost behind every sender, and a receiver checks it
+from headers alone: a stream of n carriers needs n mined outputs of the
+sender's own. It is a setup cost, not a cost per message or per receiver.
+Carriers are never mined, so the chain does not record an output as
+used: one stream can go to many receivers for the postage of one, and a
+receiver that keeps no memory cannot see an output that backed an earlier
+stream. Noticing that takes an index of what was seen, which is a host's
+job and a seam here.
 
 ## Shape
 

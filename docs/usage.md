@@ -194,6 +194,14 @@ a reasonable start; your own block-headers-service or node is better.
 The sender pays miner fees for postage, once, and nothing per byte sent.
 The receiver pays nothing. No payment moves between the two.
 
+Postage bounds what it costs to set a sender up, not what a message or a
+receiver costs. beefcat itself spends one funding output per carrier and
+never one twice, so the table below is what its own sends consume. A
+carrier is never mined, though, so the chain keeps no record of an output
+having been used: one stream can be sent to any number of receivers for
+the postage of one, and a receiver cannot see an output that already
+backed another stream.
+
 A funding tree is one mined transaction of about 190 bytes plus 58 bytes
 per output. Each output holds one satoshi. At the network's rate of 100
 satoshis per 1,000 bytes, with a 100 satoshi minimum:
