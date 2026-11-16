@@ -1,0 +1,101 @@
+beefcat
+Copyright 2026 Lightweb Inc. (https://lightweb.net)
+
+=========================================================================
+
+beefcat is netcat for the BEEF data carrier, with SPV. A sender cuts any
+bytes into chunks and signs each into a carrier: a transaction that can
+never be mined, spending one mined funding output. The far end checks
+each carrier against block headers it fetches itself, and writes a
+carrier's data only after that carrier verified.
+
+The data is never mined. It verifies by SPV through the mined output its
+carrier spends, without paying for block space, and its sender can
+retract it by spending that output. Data that does not verify, a sender
+who is not the one pinned, a stream cut short, and retracted data are
+refused loudly.
+
+=========================================================================
+Third-Party Standards
+
+  BRC-42:  BSV Key Derivation Scheme
+  BRC-43:  Security Levels, Protocol IDs, Key IDs and Counterparties
+  BRC-48:  Pay to Push Drop
+  BRC-62:  Background Evaluation Extended Format
+  BRC-67:  Simplified Payment Verification
+  BRC-74:  BSV Unified Merkle Path
+  BRC-95:  Atomic BEEF
+  BRC-100: Wallet-to-Application Interface
+  BSV Blockchain Standards Repository
+  https://github.com/bsv-blockchain/BRCs/
+
+  RFC 6979: Deterministic Usage of DSA and ECDSA
+  https://www.rfc-editor.org/rfc/rfc6979
+
+=========================================================================
+Interoperability
+
+beefcat speaks published standards and holds no private protocol beyond
+the payload header and framing in docs/frozen.md. Any program that can
+check a BEEF against block headers can verify a carrier, and any program
+that follows docs/frozen.md can read or write a stream.
+
+=========================================================================
+Third-Party Software
+
+This product includes third-party software, distributed under the terms
+of their respective licenses. Each dependency retains its own copyright;
+this notice does not modify those licenses.
+
+  github.com/bsv-blockchain/go-sdk             Open BSV License Version 5, MIT License
+  github.com/lightwebinc/bcommon               Apache License 2.0
+  github.com/lightwebinc/bcommon/devkit        Apache License 2.0
+  github.com/mrz1836/go-whatsonchain           MIT License
+  github.com/pkg/errors                        BSD License
+  github.com/stretchr/testify                  MIT License
+  go.yaml.in/yaml/v3                           MIT License, Apache License 2.0
+  golang.org/x/crypto                          BSD License
+
+Three DIRECT dependencies, github.com/bsv-blockchain/go-sdk,
+github.com/lightwebinc/bcommon and github.com/lightwebinc/bcommon/devkit,
+are a rule this repository enforces in CI. bcommon is Lightweb Inc.'s
+library of the generic building blocks beefcat is made from, published
+separately under Apache-2.0; its devkit is the local stand-in chain,
+linked only into the devchain command. go-sdk brings the others with it,
+and a statically linked binary contains them whether they were asked for
+directly or not.
+
+© BSV Association,
+
+The attribution line above is reproduced verbatim as the Open BSV License
+Version 5 requires it, for github.com/bsv-blockchain/go-sdk.
+
+Two terms of that license are worth stating in plain words, because they
+do not match the permissive licenses usually found beside it: the grant
+is made on a revocable basis, and the software it covers, together with
+anything derived from it, must only be used on the BSV Blockchains.
+Non-compliance extinguishes the license. Those terms bind this product's
+use of that dependency. They do not extend to Lightweb Inc.'s own source,
+which is Apache-2.0 as stated in LICENSE.
+
+The full text of every license above is reproduced verbatim in
+LICENSE-THIRD-PARTY, which is GENERATED from what the binaries actually
+link (make licences checks it) rather than maintained by hand. It ships
+with every release tarball.
+
+Section 4(d) of the Apache License asks for more than its text: where a
+module ships a NOTICE file, its attribution notices travel too. Three
+of the modules above ship one (bcommon's devkit ships bcommon's), and
+their attribution notices are these:
+
+  go.yaml.in/yaml/v3
+    Copyright 2011-2016 Canonical Ltd.
+
+  github.com/lightwebinc/bcommon
+    bcommon
+    Copyright 2026 Lightweb Inc. (https://lightweb.net)
+
+bcommon's NOTICE also carries go-sdk's Open BSV attribution line, which
+is reproduced above.
+
+=========================================================================

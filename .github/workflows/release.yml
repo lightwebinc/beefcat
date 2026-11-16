@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  # beefcat is a command somebody installs, so a release carries the binary:
+  # four platforms, each a static binary in a tarball beside the licenses.
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          cache: false
+          # The CI toolchain; it may lead go.mod's go line.
+          go-version: "1.27.4"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -eux
+          version="${GITHUB_REF_NAME#v}"
+          dir="beefcat_${version}_${GOOS}_${GOARCH}"
+          mkdir -p "dist/${dir}"
+          GOWORK=off go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.version=${version}" \
+            -o "dist/${dir}/beefcat" ./cmd/beefcat
+          # The licenses travel INSIDE the tarball. A statically linked
+          # binary contains its dependencies' code, and three of those
+          # licenses require their own text to reach whoever receives a
+          # binary rather than only whoever receives source.
+          cp LICENSE NOTICE LICENSE-THIRD-PARTY README.md "dist/${dir}/"
+          tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
+          ( cd dist && sha256sum "${dir}.tar.gz" > "${dir}.tar.gz.sha256" )
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: beefcat_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -eux
+          cd dist
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          rm -f ./*.tar.gz.sha256
+          ls -l
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

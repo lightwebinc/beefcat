@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.4"
+      - name: gofmt
+        run: make fmt-check
+      - name: vet
+        run: make vet
+      # The direct dependencies are exactly go-sdk, bcommon and its devkit,
+      # go.mod is tidy, nothing is replaced, and go-sdk resolves to exactly
+      # the DEPS_SDK pin in the Makefile.
+      - name: dependency set
+        run: make deps-check
+      # LICENSE-THIRD-PARTY is generated from what the binaries link; a new
+      # dependency without its license in the file fails here.
+      - name: licences
+        run: make licences
+      # Every refusal is a test: altered, forged, cut short, reordered,
+      # spliced, mineable, unproven postage, an untrusted sender, retracted.
+      - name: test
+        run: make test
+      # QUICKSTART.md's sandbox, run as written.
+      - name: quickstart
+        run: make quickstart-check
