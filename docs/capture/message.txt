@@ -1,0 +1,3 @@
+Hello from beefcat.
+These bytes rode one unmineable Bitcoin transaction,
+signed by its sender and proven by SPV before you read them.

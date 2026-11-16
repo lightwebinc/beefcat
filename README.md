@@ -1,6 +1,9 @@
 # beefcat
 
 [![CI](https://github.com/lightwebinc/beefcat/actions/workflows/ci.yml/badge.svg)](https://github.com/lightwebinc/beefcat/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/lightwebinc/beefcat)](https://github.com/lightwebinc/beefcat/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/lightwebinc/beefcat.svg)](https://pkg.go.dev/github.com/lightwebinc/beefcat)
+[![Go version](https://img.shields.io/github/go-mod/go-version/lightwebinc/beefcat)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 > [!WARNING]
@@ -15,16 +18,19 @@ blockchain to send them. The proof travels with the data. The receiver
 needs nothing but block headers, from a source it chooses.
 
 ```console
-receiver$ beefcat -l 9000 -k 02c6...9a1e > report.pdf
-sender$   beefcat receiver.example.com 9000 < report.pdf
+receiver$ beefcat -l 9000 -k 03c1873f...9911c982 > received.bin
+sender$   beefcat receiver.example.com 9000 < file.bin
 ```
 
 ```text
-beefcat: VERIFIED 3 carrier(s), 10000000 bytes in 78ms
-  sender      02c6...9a1e (pinned with -k)
-  postage     funding transaction 6ece...a4e0, mined at height 802
+beefcat: VERIFIED 5 carrier(s), 20000000 bytes in 596ms
+  sender      03c1873f...9911c982 (pinned with -k)
+  postage     funding transaction f67988ab...08ef1cce, mined at height 975787
   headers     woc:main
 ```
+
+That is a real run on mainnet; [docs/walkthrough.md](docs/walkthrough.md)
+has all of it.
 
 The data is never mined. Each chunk rides a **carrier**: a signed
 transaction built so that it cannot be mined, spending one output of a
@@ -59,6 +65,8 @@ verifies, so pin the key you expect with `-k`.
 | --- | --- |
 | Try it in two minutes on one machine, with no coin | [QUICKSTART.md](QUICKSTART.md) |
 | Send on mainnet | [QUICKSTART.md](QUICKSTART.md#on-mainnet) |
+| See a real run on mainnet, with every refusal | [docs/walkthrough.md](docs/walkthrough.md) |
+| See it on the wire: a packet capture with every byte named | [docs/capture.md](docs/capture.md) |
 | Every command and flag, costs and limits | [docs/usage.md](docs/usage.md) |
 | What is checked, in what order, and what SPV cannot tell you | [docs/verification.md](docs/verification.md) |
 | The formats that never change | [docs/frozen.md](docs/frozen.md) |
