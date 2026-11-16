@@ -65,10 +65,17 @@ never holds an unverified byte. The cost is that a stream which fails
 part way leaves a verified prefix behind; `-save` trades streaming for
 all-or-nothing.
 
-**The order and the end are signed.** Each carrier names the stream, its
-sequence, and the transaction id of the carrier before it, and the last
-one says it is the last. A transport that drops, repeats, reorders or
+**The order and the end are signed.** Each carrier names its stream and
+its sequence number, the last one says it is the last, and the sender
+signs that with the data. A transport that drops, repeats, reorders or
 truncates is caught by arithmetic, not by trusting TCP.
+
+**No carrier depends on another's bytes.** A carrier could also name the
+transaction id of the one before it. That adds nothing a third party
+could not already be caught at, since every carrier is signed over its
+place in the stream, and it would force the sender to sign one carrier at
+a time. Without it a sender signs, and a receiver checks, as many
+carriers at once as it has cores; only the order is settled in sequence.
 
 **Postage must itself be mined.** A funding transaction that merely
 spends a mined coin verifies by SPV through its parent without ever being

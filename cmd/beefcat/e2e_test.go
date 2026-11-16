@@ -74,6 +74,14 @@ func newChain(t *testing.T) (*testchain.Chain, string) {
 	return c, srv.URL
 }
 
+func benchChain(b *testing.B) (*testchain.Chain, string) {
+	b.Helper()
+	c := testchain.New(700)
+	srv := httptest.NewServer(c)
+	b.Cleanup(srv.Close)
+	return c, srv.URL
+}
+
 func newRig(t *testing.T, postage int) *rig {
 	t.Helper()
 	c, url := newChain(t)
@@ -537,12 +545,11 @@ func listenOnce(t *testing.T, r *rig, port string, flags ...string) func() (int,
 // forge signs carriers by hand, from the rig's own home, so a test can
 // build what an honest sender never does.
 type forge struct {
-	t    *testing.T
-	h    *opened
-	id   [33]byte
-	prev [32]byte
-	seq  uint64
-	sid  [16]byte
+	t   *testing.T
+	h   *opened
+	id  [33]byte
+	seq uint64
+	sid [16]byte
 }
 
 func newForge(t *testing.T, r *rig) *forge {
@@ -562,7 +569,7 @@ func newForge(t *testing.T, r *rig) *forge {
 func (f *forge) carrier(tree *transaction.Transaction, vout uint32, data string, last bool) []byte {
 	f.t.Helper()
 	sg := f.h.e.Signer()
-	hd := wire.Header{Last: last, Stream: f.sid, Seq: f.seq, Prev: f.prev, Identity: f.id}
+	hd := wire.Header{Last: last, Stream: f.sid, Seq: f.seq, Identity: f.id}
 	tx, err := carrier.Mint(context.Background(), sg, sg.Originator, wire.Params, append(hd.Append(nil), data...), tree, vout)
 	if err != nil {
 		f.t.Fatal(err)
@@ -571,7 +578,7 @@ func (f *forge) carrier(tree *transaction.Transaction, vout uint32, data string,
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	f.prev, f.seq = carrier.Commitment(tx), f.seq+1
+	f.seq++
 	return b
 }
 
@@ -764,9 +771,10 @@ func TestUntrustedMeansVerified(t *testing.T) {
 }
 
 // A refusal reaches the sender however large the stream, and stops it
-// spending postage on a stream already refused.
+// spending postage on a stream already refused. Carriers are signed a few
+// ahead of the one being written, so a few more than were sent are spent.
 func TestLargeRefusalReachesSender(t *testing.T) {
-	r := newRig(t, 12)
+	r := newRig(t, 200)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -774,13 +782,13 @@ func TestLargeRefusalReachesSender(t *testing.T) {
 	p := fmt.Sprint(l.Addr().(*net.TCPAddr).Port)
 	l.Close()
 	done := listenOnce(t, r, p, "-k", r.identity(r.newHome(1)))
-	code, e := dial(t, random(40<<20), "-home", r.home, "127.0.0.1", p)
+	code, e := dial(t, random(200<<18), "-home", r.home, "-chunk", "256K", "127.0.0.1", p)
 	if code != exitUntrusted || !strings.Contains(e, "THE FAR END REFUSED THIS DATA") {
 		t.Fatalf("send: %d\n%s", code, e)
 	}
 	rc, out, re := done()
 	refused(t, "REFUSED-UNTRUSTED", rc, out, re)
-	if _, o, _ := cat(t, nil, "status", "-home", r.home); strings.Contains(string(o), "postage      2 carrier(s) left") {
+	if _, o, _ := cat(t, nil, "status", "-home", r.home); strings.Contains(string(o), "postage      0 carrier(s) left") {
 		t.Fatalf("the whole stream was sent to a far end that had refused it:\n%s", o)
 	}
 }

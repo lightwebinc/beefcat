@@ -42,9 +42,10 @@ empty carrier that closes the stream.
 
 Over TCP the sender waits for the far end's one-line verdict and exits
 with it: 0 verified, 3 refused, 4 refused because the far end pinned
-another sender. A refusal arrives as soon as the far end reaches it, and
-stops the send there, so no more postage is spent on a stream already
-refused.
+another sender. A refusal arrives as soon as the far end reaches it and
+stops the send. Carriers are signed a few ahead of the one being written,
+one per core and at most 16, so that many more than were sent may have
+been spent.
 
 ### Receiving
 
@@ -185,14 +186,28 @@ byte: a thousand one-line messages cost as much postage as 4 GiB.
 | Connections per listener | one, then it exits |
 
 Each carrier carries the funding tree it spends from, so the bytes on the
-wire are the data plus, per carrier, the tree's size and about 460 bytes.
+wire are the data plus, per carrier, the tree's size and about 430 bytes.
 From a 256-output tree that is 0.4 % over the data at 4 MiB a carrier,
 and 1.4 % from a 1,023-output tree. For short messages, fund a small tree:
 a one-line message from a 1-output tree is about 700 bytes on the wire,
 and about 60,000 from a 1,023-output tree.
 
-On one workstation, over loopback, 1 GiB was sent, verified and written
-in 5 seconds.
+## Speed
+
+Carriers are signed and verified on several cores at once, one per core
+and at most 16, each holding one carrier in memory. Measured with 1 GiB
+of random data on a local chain:
+
+| Run | Time | Rate |
+| --- | --- | --- |
+| Send to a file, 32-thread workstation | 0.9 s | about 1.2 GB/s |
+| Verify a file, same machine | 1.0 s | about 1.1 GB/s |
+| Send over a 10 GbE link to a 16-thread host, verified there | 1.4 s | about 750 MB/s |
+
+The work is hashing, so a CPU without SHA extensions is several times
+slower per core. A receiver's first proof costs one request to its header
+source: about 0.3 s against a public service, which is most of the time a
+small transfer takes. A header service of your own removes it.
 
 The data is signed, not encrypted, and the connection is plain TCP.
 Anyone on the path can read it. Nobody on the path can change it

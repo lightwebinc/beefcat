@@ -9,7 +9,7 @@ import (
 
 func TestHeaderRoundTrip(t *testing.T) {
 	h := Header{Last: true, Seq: 7}
-	h.Stream[0], h.Prev[31], h.Identity[0] = 1, 2, 3
+	h.Stream[0], h.Identity[0] = 1, 3
 	p := append(h.Append(nil), "data"...)
 	if len(p) != HeaderLen+4 {
 		t.Fatalf("header is %d bytes, want %d", len(p)-4, HeaderLen)
@@ -29,13 +29,11 @@ func TestHeaderRoundTrip(t *testing.T) {
 func TestParseRefusals(t *testing.T) {
 	good := func() []byte { return Header{}.Append(nil) }
 	for name, mut := range map[string]func([]byte) []byte{
-		"short":            func(p []byte) []byte { return p[:HeaderLen-1] },
-		"magic":            func(p []byte) []byte { p[0] = 'X'; return p },
-		"version":          func(p []byte) []byte { p[4] = 2; return p },
-		"flags":            func(p []byte) []byte { p[5] = 2; return p },
-		"first names prev": func(p []byte) []byte { p[30] = 1; return p },
-		"later names none": func(p []byte) []byte { p[29] = 1; return p },
-		"too much data":    func(p []byte) []byte { return append(p, make([]byte, MaxData+1)...) },
+		"short":         func(p []byte) []byte { return p[:HeaderLen-1] },
+		"magic":         func(p []byte) []byte { p[0] = 'X'; return p },
+		"version":       func(p []byte) []byte { p[4] = 2; return p },
+		"flags":         func(p []byte) []byte { p[5] = 2; return p },
+		"too much data": func(p []byte) []byte { return append(p, make([]byte, MaxData+1)...) },
 	} {
 		if _, _, err := Parse(mut(good())); err == nil {
 			t.Errorf("%s: accepted", name)

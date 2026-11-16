@@ -33,7 +33,7 @@ Defined by bcommon's `carrier` package and unchanged here:
 
 ## The payload header
 
-Every carrier's payload opens with 95 bytes, integers big-endian:
+Every carrier's payload opens with 63 bytes, integers big-endian:
 
 | Offset | Size | Field |
 | --- | --- | --- |
@@ -42,9 +42,8 @@ Every carrier's payload opens with 95 bytes, integers big-endian:
 | 5 | 1 | flags: bit 0 set on the last carrier of a stream; the others zero |
 | 6 | 16 | stream id, random per stream |
 | 22 | 8 | sequence, from 0 |
-| 30 | 32 | transaction id (hash byte order) of the previous carrier; all zero when the sequence is 0, and only then |
-| 62 | 33 | the sender's identity key, compressed |
-| 95 | | data, 0 to 4,194,304 bytes |
+| 30 | 33 | the sender's identity key, compressed |
+| 63 | | data, 0 to 4,194,304 bytes |
 
 A reader refuses an unknown version or a set flag it does not know.
 

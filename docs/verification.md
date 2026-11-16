@@ -33,7 +33,7 @@ stopping at the first that fails:
 | 5 | Its input is unlocked by exactly one canonical signature, so nobody can rewrite it under another transaction id | `REFUSED-UNLOCKING` |
 | 6 | Its lock is the key the named identity derives | `REFUSED-KEY-DERIVE` |
 | 7 | The signature over the data verifies under that key | `REFUSED-SIG` |
-| 8 | Same sender and same stream as the first carrier, the next sequence number, naming the transaction id of the carrier before it | `REFUSED-KEY`, `REFUSED-SEQ` |
+| 8 | Same sender and same stream as the first carrier, and the next sequence number | `REFUSED-KEY`, `REFUSED-SEQ` |
 | 9 | It spends a beefcat funding output of the sender's own, in a transaction that carries its own Merkle path, and that path leads from that transaction | `REFUSED-DECODE`, `REFUSED-BUMP` |
 | 10 | No earlier carrier of the stream spent that output | `REFUSED-FORK` |
 | 11 | SPV: the input's signature satisfies the funding output, and the Merkle path leads to a root your header source holds at that height | `REFUSED-SIG`, `REFUSED-BUMP` |
