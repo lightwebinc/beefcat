@@ -167,9 +167,11 @@ That is weaker than a real block in two ways:
 | One source | Whoever controls the source, or the path to it, can serve a header of their own |
 | No chain linkage, and a floor instead of real difficulty | A forged header needs only the floor's work, once, not the work of a real block and everything after it |
 
-So a forged proof costs an attacker who can answer for your header
-source about as much as mining one header at the floor. That is real
-work, and far less than out-working the chain.
+So against a source that serves headers, a forged proof costs an
+attacker who can answer for it about as much as mining one header at the
+floor. That is real work, and far less than out-working the chain.
+Against a source that serves only roots it costs no work at all: use one
+only where you run it and trust the path to it.
 
 A local header chain on the receiver closes both gaps: every header
 checked for work and linked to its parent, kept from several sources,
