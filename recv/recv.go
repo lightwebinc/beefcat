@@ -117,6 +117,12 @@ func (r *Refusal) Error() string {
 // outputs already spent) is checked in order, by the one goroutine that
 // writes, so the verdict is the one a reader working a carrier at a time
 // would reach: the first carrier that fails, for the first check it fails.
+//
+// Receive reads ahead of what it has written, and a read cannot be called
+// off: when it returns early, on a refusal or an error, a read of r may
+// still be in flight and may take bytes that arrive later. So r is spent
+// once Receive is called. A caller does not read it again, and does not
+// hand it to another reader, though it may close it.
 func Receive(ctx context.Context, r io.Reader, w io.Writer, o Options) (Summary, error) {
 	var s Summary
 	if o.Headers == nil {

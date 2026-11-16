@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -42,7 +43,7 @@ import (
 func init() { poll = 10 * time.Millisecond }
 
 // cat runs one beefcat command and returns its exit status and streams.
-func cat(t *testing.T, stdin []byte, args ...string) (int, []byte, string) {
+func cat(t testing.TB, stdin []byte, args ...string) (int, []byte, string) {
 	t.Helper()
 	dir := t.TempDir()
 	in, err := os.Create(filepath.Join(dir, "stdin"))
@@ -68,7 +69,7 @@ func cat(t *testing.T, stdin []byte, args ...string) (int, []byte, string) {
 
 // rig is a chain, a funded sender's home, and what a receiver is given.
 type rig struct {
-	t     *testing.T
+	t     testing.TB
 	chain *testchain.Chain
 	url   string
 	home  string
@@ -1007,5 +1008,83 @@ func TestPeerPayLink(t *testing.T) {
 		if _, _, err := peerpay.ParseURI(bad); err == nil {
 			t.Fatalf("%q was accepted", bad)
 		}
+	}
+}
+
+// A key has one spelling, and a notice is delivered again only to a message
+// box a new withdrawal could have used.
+func TestWithdrawGuards(t *testing.T) {
+	r := newRig(t, 1)
+	if err := peerpay.CheckKey(strings.ToUpper(r.key)); err == nil {
+		t.Fatal("an uppercase key was accepted")
+	}
+	// The home's own key, in uppercase, is refused as a key, not sent to.
+	if code, _, _ := cat(t, nil, "withdraw", "-home", r.home, "-messagebox", "https://box.example.com", "-yes", strings.ToUpper(r.key)); code != exitUsage {
+		t.Fatalf("the home's own key in uppercase: exit %d", code)
+	}
+	rk, err := ec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := deliver
+	var boxes []string
+	deliver = func(_ context.Context, box string, _ wallet.Interface, _ peerpay.Message) error {
+		boxes = append(boxes, box)
+		return nil
+	}
+	defer func() { deliver = old }()
+	link := "peerpay:" + hex.EncodeToString(rk.PubKey().Compressed()) + "?url=https%3A%2F%2Fbox.example.com"
+	code, o, e := cat(t, nil, "withdraw", "-home", r.home, "-sats", "1000", "-yes", link)
+	if code != 0 {
+		t.Fatalf("withdraw: %d\n%s%s", code, o, e)
+	}
+	txid := strings.Fields(string(o)[strings.Index(string(o), "txid"):])[1]
+	if code, _, _ := cat(t, nil, "withdraw", "-home", r.home, "-redeliver", txid, "-messagebox", "http://box.example.com"); code != exitUsage || len(boxes) != 1 {
+		t.Fatalf("redelivery to a plain http box: exit %d, %d deliveries", code, len(boxes))
+	}
+	if code, _, _ := cat(t, nil, "withdraw", "-home", r.home, "-redeliver", txid, "-messagebox", "https://other.example.com"); code != 0 || boxes[len(boxes)-1] != "https://other.example.com" {
+		t.Fatalf("redelivery to another https box: exit %d, %v", code, boxes)
+	}
+}
+
+// failAfter is a writer that takes n writes and then fails.
+type failAfter struct{ n int }
+
+func (f *failAfter) Write(p []byte) (int, error) {
+	if f.n--; f.n < 0 {
+		return 0, errors.New("the far end went away")
+	}
+	return len(p), nil
+}
+
+// Once a send has returned, input that arrives later spends no postage:
+// the reader it left behind cannot be called off, but it changes nothing.
+func TestNoPostageSpentAfterSendReturns(t *testing.T) {
+	r := newRig(t, 8)
+	g := &global{home: r.home, cfg: home.Config{Network: "regtest"}}
+	h, err := g.openHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.close()
+	sg := h.e.Signer()
+	s := &send.Sender{Wallet: sg, Originator: sg.Originator, State: h.st, Lines: true}
+	copy(s.Identity[:], sg.IdentityKey().Compressed())
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	// The preamble and the first line's frame (length, body) are taken;
+	// the second line's is not.
+	go func() { _, err := s.Stream(context.Background(), pr, &failAfter{n: 3}); done <- err }()
+	_, _ = pw.Write([]byte("one\n"))
+	_, _ = pw.Write([]byte("two\n"))
+	if err := <-done; err == nil {
+		t.Fatal("the send did not fail")
+	}
+	left := h.st.Remaining()
+	_, _ = pw.Write([]byte("three\nfour\n"))
+	pw.Close()
+	time.Sleep(100 * time.Millisecond)
+	if got := h.st.Remaining(); got != left {
+		t.Fatalf("postage went from %d to %d after the send returned", left, got)
 	}
 }

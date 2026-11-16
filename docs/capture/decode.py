@@ -213,6 +213,8 @@ for i in range(ntx):
     ids[kind] = tx(kind)
 assert pos == frame_end == len(c), (pos, frame_end, len(c))
 assert ids['carrier'] == subject
+spends = next(x['val'] for x in fields if x['sec'] == 'Carrier (never mined)' and x['name'] == 'Input: previous txid')
+assert spends == rev(ids['funding']), 'the carrier does not spend the funding transaction in the envelope'
 
 reply = streams[False].decode()
 out = dict(

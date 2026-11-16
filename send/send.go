@@ -106,6 +106,17 @@ func (s *Sender) Stream(ctx context.Context, r io.Reader, w io.Writer) (Stats, e
 	}
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	// The reading goroutine can outlive this call: a read of r cannot be
+	// called off. It takes a funding output under own, and only while the
+	// call is live, so once Stream has returned nothing changes the home's
+	// state, whatever input arrives afterwards.
+	var own sync.Mutex
+	live := true
+	defer func() {
+		own.Lock()
+		live = false
+		own.Unlock()
+	}()
 
 	// One goroutine reads, numbers and funds the chunks, in order, and
 	// queues each carrier's frame as a promise; this one writes them in
@@ -129,7 +140,13 @@ func (s *Sender) Stream(ctx context.Context, r io.Reader, w io.Writer) (Stats, e
 		// emit hands one chunk to a worker. data is the reader's buffer,
 		// so it is copied behind its header before emit returns.
 		emit := func(data []byte, last bool) bool {
+			own.Lock()
+			if !live || ctx.Err() != nil {
+				own.Unlock()
+				return false
+			}
 			tree, vout, err := s.take(len(data))
+			own.Unlock()
 			if err != nil {
 				fail(err)
 				return false

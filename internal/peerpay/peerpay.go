@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	authhttp "github.com/bsv-blockchain/go-sdk/auth/clients/authhttp"
 	"github.com/bsv-blockchain/go-sdk/wallet"
@@ -118,11 +119,22 @@ func (noPay) CreateAction(context.Context, wallet.CreateActionArgs, string) (*wa
 	return nil, ErrPayment
 }
 
-// maxAnswer bounds what a server's answer may be.
-const maxAnswer = 1 << 20
+// maxAnswer bounds what a server's answer may be, and sendTimeout how long
+// one delivery may take.
+const (
+	maxAnswer   = 1 << 20
+	sendTimeout = 30 * time.Second
+)
 
 // Send puts m in the recipient's payment inbox at the message box server.
 func Send(ctx context.Context, base string, w wallet.Interface, m Message) error {
+	if err := CheckBox(base); err != nil {
+		return err
+	}
+	// A payment is already broadcast when its notice is sent, so a box that
+	// takes the connection and never answers must not hold the command.
+	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
 	f := authhttp.New(noPay{w}, authhttp.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	body, err := json.Marshal(map[string]any{"message": map[string]any{
 		"recipient": m.Recipient, "messageBox": Inbox, "messageId": m.ID, "body": m.Body,
@@ -183,11 +195,13 @@ func ParseURI(s string) (keyHex, box string, err error) {
 	return key, box, nil
 }
 
-// CheckKey refuses anything but a canonical compressed public key in hex.
+// CheckKey refuses anything but a canonical compressed public key in
+// lowercase hex. One key has one spelling: a message box files a payment
+// under the recipient as it is written, and a key is compared as a string.
 func CheckKey(keyHex string) error {
 	b, err := hex.DecodeString(keyHex)
-	if err != nil || len(b) != 33 {
-		return fmt.Errorf("%q is not an identity key (66 hex characters)", keyHex)
+	if err != nil || len(b) != 33 || keyHex != strings.ToLower(keyHex) {
+		return fmt.Errorf("%q is not an identity key (66 lowercase hex characters)", keyHex)
 	}
 	if _, err := guard.ParsePubKey(b); err != nil {
 		return fmt.Errorf("%q is not a public key: %v", keyHex, err)
