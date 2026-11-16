@@ -6,9 +6,12 @@
 // Atomic BEEF (BRC-95): an unmineable transaction whose output holds a
 // signed payload and whose one input spends a mined funding output
 // (bcommon's carrier package). The payload is a fixed header followed by the
-// sender's bytes. The header chains every carrier to the one before it, so
-// order and the end of the stream are signed and a reader can refuse a
-// stream that was reordered, spliced or cut short.
+// sender's bytes. The header numbers every carrier within its stream and
+// marks the last, and the sender signs it with the data, so order and the
+// end of the stream are signed and a reader can refuse a stream that was
+// reordered, spliced or cut short. No carrier depends on another's bytes,
+// so a sender signs them, and a reader checks them, on as many cores as it
+// has.
 package wire
 
 import (
@@ -50,7 +53,7 @@ var (
 	}
 )
 
-// The payload header, 95 bytes, every integer big-endian:
+// The payload header, 63 bytes, every integer big-endian:
 //
 //	offset  size  field
 //	0       4     magic "BCAT"
@@ -58,15 +61,13 @@ var (
 //	5       1     flags; bit 0 set on the last carrier of a stream
 //	6       16    stream id, random per stream
 //	22      8     sequence, from 0
-//	30      32    commitment (txid, hash byte order) of the previous
-//	              carrier; all zero when the sequence is 0
-//	62      33    the sender's identity key, compressed
-//	95      ...   data, 0 to MaxData bytes
+//	30      33    the sender's identity key, compressed
+//	63      ...   data, 0 to MaxData bytes
 const (
 	Magic     = "BCAT"
 	Version   = 1
 	FlagLast  = 0x01
-	HeaderLen = 95
+	HeaderLen = 63
 	// MaxData is the most data one carrier holds.
 	MaxData = 4 << 20
 	// MaxFrame bounds one frame: the data, its header and transaction, and
@@ -82,7 +83,6 @@ type Header struct {
 	Last     bool
 	Stream   [16]byte
 	Seq      uint64
-	Prev     [32]byte
 	Identity [33]byte
 }
 
@@ -102,7 +102,6 @@ func (h Header) Append(dst []byte) []byte {
 	dst = append(dst, Version, flags)
 	dst = append(dst, h.Stream[:]...)
 	dst = binary.BigEndian.AppendUint64(dst, h.Seq)
-	dst = append(dst, h.Prev[:]...)
 	return append(dst, h.Identity[:]...)
 }
 
@@ -123,11 +122,7 @@ func Parse(payload []byte) (Header, []byte, error) {
 	h.Last = payload[5]&FlagLast != 0
 	copy(h.Stream[:], payload[6:22])
 	h.Seq = binary.BigEndian.Uint64(payload[22:30])
-	copy(h.Prev[:], payload[30:62])
-	copy(h.Identity[:], payload[62:95])
-	if (h.Seq == 0) != (h.Prev == [32]byte{}) {
-		return h, nil, fmt.Errorf("%w: the first carrier, and only the first, names no previous carrier", ErrPayload)
-	}
+	copy(h.Identity[:], payload[30:63])
 	data := payload[HeaderLen:]
 	if len(data) > MaxData {
 		return h, nil, fmt.Errorf("%w: %d bytes of data, more than %d", ErrPayload, len(data), MaxData)
