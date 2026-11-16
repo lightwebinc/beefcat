@@ -15,7 +15,9 @@ Any bytes in, sent to an address and port, and the far end proves three
 things about them before it writes one: the bytes are exactly what was
 sent, a named key signed them, and that key holds mined postage on the BSV
 blockchain. The proof travels with the data. The receiver
-needs nothing but block headers, from a source it chooses.
+needs nothing but block headers, from a source it chooses, and the proof
+is as strong as that source: see
+[how far the header check goes](docs/verification.md#how-far-the-header-check-goes).
 
 ```console
 receiver$ beefcat -l 9000 -k 03c1873f...9911c982 > received.bin

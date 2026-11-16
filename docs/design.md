@@ -112,3 +112,4 @@ Each of these is a seam, left open rather than closed off.
 | Keeping a listener open for many streams | A drop box |
 | A receiver that watches for retraction after the fact | Today `-unspent` looks once, at verification time |
 | A receiver that remembers funding outputs across streams | Refusing postage used before |
+| A local header chain on the receiver | Headers checked for work and linked to their parents, from several sources: a forged proof would have to out-work the chain, not one header at a floor from one source |

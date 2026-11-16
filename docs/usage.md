@@ -175,8 +175,11 @@ A receiver with no home uses the defaults for `-network` (default
 `main`), or what its flags say. Network `regtest` has no defaults: name
 every source, or use `init -devchain URL`.
 
-The header source is the one thing a receiver trusts. A public service is
-a reasonable start; your own block-headers-service or node is better.
+The header source is the one thing a receiver trusts, and beefcat asks
+one source for one header at a time, with no chain of its own. A public
+service is a reasonable start; a header service you run is the stronger
+choice, for the reasons in
+[verification.md](verification.md#how-far-the-header-check-goes).
 
 ### What talks to the network
 

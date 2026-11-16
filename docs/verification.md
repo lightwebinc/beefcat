@@ -148,10 +148,35 @@ print. Get it from the sender over a channel you already trust.
 6. **Anything about secrecy.** The data is signed, not encrypted. Anyone
    on the path can read it.
 
-Your header source is the one thing you trust. A source that serves
-header fields (WhatsOnChain, a block-headers-service, chaintracks,
-arcade) has each header's proof of work checked, on mainnet against a
-difficulty floor. Run your own where it matters.
+## How far the header check goes
+
+Your header source is the one thing you trust, and today beefcat trusts
+it more than SPV has to. For each block a proof names, it asks one remote
+source for that block's header and checks two things: that the header's
+own proof of work meets its stated target, and, on mainnet, that the
+target is no easier than a fixed floor well below real difficulty. It
+does not hold a chain of headers, so it does not check that the header
+links back to the ones before it, or that it is on the chain with the
+most work. A source that serves only Merkle roots, with no header
+fields (a bare URL), has nothing checked at all: it is taken at its word.
+
+That is weaker than a real block in two ways:
+
+| Gap | What it allows |
+| --- | --- |
+| One source | Whoever controls the source, or the path to it, can serve a header of their own |
+| No chain linkage, and a floor instead of real difficulty | A forged header needs only the floor's work, once, not the work of a real block and everything after it |
+
+So a forged proof costs an attacker who can answer for your header
+source about as much as mining one header at the floor. That is real
+work, and far less than out-working the chain.
+
+A local header chain on the receiver closes both gaps: every header
+checked for work and linked to its parent, kept from several sources,
+with the most-work chain taken. beefcat does not have one yet. Until it
+does, point `-headers` at a header service you run (`bhs:URL`,
+`chaintracks:URL`), which keeps such a chain itself, and reach it over a
+path you trust.
 
 A header source that fails, rather than answering no, gives no verdict.
 A proof naming a block the source will not answer for at all can
