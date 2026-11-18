@@ -1358,13 +1358,17 @@ func TestSendMaxAge(t *testing.T) {
 func TestFundStopsWhenBlocksOutrunTrees(t *testing.T) {
 	c := testchain.New(700)
 	var fast atomic.Bool
+	var outran atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		before := len(c.Txids())
 		c.ServeHTTP(w, req)
 		// Two more blocks on top of every transaction the chain takes:
 		// a tree is two blocks old, out of a window of one, as soon as
 		// it is mined.
-		if fast.Load() && len(c.Txids()) > before {
+		// Past twice the trees fund may mint, the chain keeps pace again:
+		// a fund with no bound then reaches its target and fails the test
+		// below, where it would otherwise mint until the test timed out.
+		if fast.Load() && len(c.Txids()) > before && outran.Add(1) <= 8 {
 			if _, err := c.Generate(2, "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"); err != nil {
 				t.Error(err)
 			}
