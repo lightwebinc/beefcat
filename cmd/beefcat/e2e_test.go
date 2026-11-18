@@ -1321,6 +1321,10 @@ func TestSendMaxAge(t *testing.T) {
 	if code == 0 || !strings.Contains(e, "takes 3 carrier(s) and the home has postage for 1 no more than 2 block(s) old") {
 		t.Fatalf("exit %d\n%s", code, e)
 	}
+	// A target the window cannot hold is refused before anything is minted.
+	if code, _, e := cat(t, nil, "fund", "-home", r.home, "-n", "2047", "-max-age", "1"); code != exitUsage || !strings.Contains(e, "nothing was minted") {
+		t.Fatalf("fund -n 2047 -max-age 1: %d\n%s", code, e)
+	}
 	// The flags of a receiver are refused on a send.
 	if code, _, _ := cat(t, []byte("x"), "-home", r.home, "-o", out, "-seen", "f"); code != exitUsage {
 		t.Fatalf("-seen on a send: exit %d", code)

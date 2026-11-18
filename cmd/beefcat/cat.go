@@ -12,10 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/lightwebinc/bcommon/headers"
 	"github.com/lightwebinc/bcommon/termsafe"
 	"github.com/lightwebinc/bcommon/verify"
 
@@ -432,28 +430,6 @@ func (s seenLog) Add(o recv.Outpoint, carrier [32]byte, height uint32) error {
 func (s seenLog) Sync() error   { return s.l.Sync() }
 func (s seenLog) Floor() uint32 { return s.l.Floor() }
 
-// oneTip is a header source whose tip is asked once and then held, so the
-// record of outputs seen is pruned against the same tip the stream's age
-// is measured against.
-type oneTip struct {
-	*headers.Client
-	mu   sync.Mutex
-	tip  uint32
-	have bool
-}
-
-func (o *oneTip) CurrentHeight(ctx context.Context) (uint32, error) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if !o.have {
-		tip, err := o.Client.CurrentHeight(ctx)
-		if err != nil {
-			return 0, err
-		}
-		o.tip, o.have = tip, true
-	}
-	return o.tip, nil
-}
 
 // close releases the reader's record of outputs seen.
 func (rd *reader) close() {
@@ -479,8 +455,7 @@ func (g *global) reader(ctx context.Context, rf recvFlags) (*reader, error) {
 	if rf.minConf > 1<<31 {
 		return nil, usage("-min-conf %d: too many", rf.minConf)
 	}
-	tips := &oneTip{Client: hc}
-	rd := &reader{g: g, opts: recv.Options{Headers: tips, Trusted: rf.keys, MaxAge: uint32(rf.maxAge), MinConf: uint32(rf.minConf)}, save: rf.save} //nolint:gosec // bounded above
+	rd := &reader{g: g, opts: recv.Options{Headers: hc, Trusted: rf.keys, MaxAge: uint32(rf.maxAge), MinConf: uint32(rf.minConf)}, save: rf.save} //nolint:gosec // bounded above
 	if rf.unspent {
 		chain, err := g.chain(hc)
 		if err != nil {
@@ -496,9 +471,12 @@ func (g *global) reader(ctx context.Context, rf recvFlags) (*reader, error) {
 		rd.seen, rd.opts.Seen = l, seenLog{l}
 		// An output older than the limit is refused for its age, so its
 		// record is no longer needed. A tip that cannot be had leaves the
-		// file as it is: the stream is then held to it when it arrives.
+		// file as it is. This tip is only for clearing the file: a stream
+		// is measured against the tip asked when it arrives, which may be
+		// much later for a listener, and the floor the file keeps refuses
+		// what was cleared should that tip be lower than this one.
 		if rf.maxAge > 0 {
-			if tip, err := tips.CurrentHeight(ctx); err == nil && tip > uint32(rf.maxAge) {
+			if tip, err := hc.CurrentHeight(ctx); err == nil && tip > uint32(rf.maxAge) {
 				if n, err := l.Prune(tip - uint32(rf.maxAge)); err != nil {
 					rd.close()
 					return nil, fmt.Errorf("-seen %s: %w", rf.seen, err)

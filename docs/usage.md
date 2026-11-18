@@ -76,7 +76,9 @@ is not there, holds 72 bytes per carrier accepted, and is used by one
 receiver at a time (`FILE.lock` beside it). Each output is recorded
 before its carrier's data is written. Without `-max-age` the file grows
 forever, and beefcat says so on every run. With it, outputs older than
-the limit are dropped each time the file is opened, and postage mined
+the limit are dropped each time the file is opened (a listener's file
+when it starts, against the tip then; its stream is measured against
+the tip when it arrives), and postage mined
 below the height the file was cleared to is refused from then on, even
 by a run with a longer limit. A receiver that restarts for each
 stream, as `-l` does, shares one FILE across its runs; another receiver
@@ -131,7 +133,11 @@ fund address from your own wallet, then import that payment:
 
 With `-max-age N` only postage mined within N blocks of the tip counts
 toward `-n`, and what is missing is minted fresh. Older postage stays in
-the home and is still spent by a send without `-max-age`.
+the home and is still spent by a send without `-max-age`. A tree is
+mined in a block of its own, so N blocks hold at most N+1 trees: a `-n`
+above 1,023 times N+1 is refused, and a run in which blocks pass faster
+than trees are mined stops after the first tree that brings it no
+nearer.
 
 ### status
 

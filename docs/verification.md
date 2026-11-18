@@ -146,8 +146,9 @@ opened. The height it was cleared to is kept in the file as a floor that
 never falls, and postage mined below the floor is refused as
 `REFUSED-STALE` whatever limit a later run gives and whatever tip the
 header source reports then: what the record forgot, it does not take
-again. The tip is asked once per run, so the record is cleared against
-the same tip the stream is measured against.
+again. The file is cleared against the tip when it is opened and a
+stream is measured against the tip when it arrives, which for a listener
+may be much later; the floor is what makes a lower tip then harmless.
 
 What they do not do:
 

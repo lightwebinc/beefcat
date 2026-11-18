@@ -487,6 +487,7 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 	// does not count: what is missing is minted fresh, and the old stays.
 	// The cutoff is taken again after every tree, since each costs a block.
 	minHeight, ageFlag := uint32(0), ""
+	minted, youngBefore := 0, uint64(0)
 	cutoff := func() error {
 		if maxAge == 0 {
 			return nil
@@ -503,14 +504,29 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 	}
 	if maxAge > 0 {
 		ageFlag = fmt.Sprintf(" -max-age %d", maxAge)
+		// A tree is mined in a block of its own, so a window of maxAge
+		// blocks holds at most maxAge+1 trees. A target beyond that is
+		// never reached, and every tree minted toward it would be paid
+		// for and aged out.
+		if most := (uint64(maxAge) + 1) * mint.MaxFundingOutputs; uint64(*n) > most { //nolint:gosec // checked non-negative
+			return usage("-n %d -max-age %d: postage no more than %d block(s) old is at most %d tree(s) of %d output(s), %d carrier(s); nothing was minted", *n, maxAge, maxAge, uint64(maxAge)+1, mint.MaxFundingOutputs, most)
+		}
 	}
 	for {
 		if err := cutoff(); err != nil {
 			return err
 		}
-		if h.st.RemainingFrom(minHeight) >= uint64(*n) { //nolint:gosec // checked non-negative
+		young := h.st.RemainingFrom(minHeight)
+		if young >= uint64(*n) { //nolint:gosec // checked non-negative
 			break
 		}
+		// Blocks that pass faster than trees are mined age postage out as
+		// fast as it is minted. One tree that leaves the home no nearer
+		// its target is enough to stop paying for more.
+		if maxAge > 0 && minted > 0 && young <= youngBefore {
+			return fmt.Errorf("minted %d tree(s) and the home is no nearer postage for %d carrier(s) no more than %d block(s) old (%d now): blocks are passing faster than trees are mined. Nothing more was minted; a longer -max-age, or a smaller -n, can be reached", minted, *n, maxAge, young)
+		}
+		youngBefore = young
 		count := int(uint64(*n) - h.st.RemainingFrom(minHeight)) //nolint:gosec // checked non-negative
 		if count > mint.MaxFundingOutputs {
 			count = mint.MaxFundingOutputs
@@ -531,6 +547,7 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 			}
 			return err
 		}
+		minted++
 		if len(h.st.Trees) == before || h.st.Trees[len(h.st.Trees)-1].BumpHex == "" {
 			return fmt.Errorf("the funding tree was broadcast and is not recorded as mined; run `beefcat fund%s` again", ageFlag)
 		}
