@@ -430,7 +430,6 @@ func (s seenLog) Add(o recv.Outpoint, carrier [32]byte, height uint32) error {
 func (s seenLog) Sync() error   { return s.l.Sync() }
 func (s seenLog) Floor() uint32 { return s.l.Floor() }
 
-
 // close releases the reader's record of outputs seen.
 func (rd *reader) close() {
 	if rd.seen != nil {
