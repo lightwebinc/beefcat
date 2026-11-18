@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1348,6 +1349,50 @@ func TestSendMaxAge(t *testing.T) {
 	// The flags of a receiver are refused on a send.
 	if code, _, _ := cat(t, []byte("x"), "-home", r.home, "-o", out, "-seen", "f"); code != exitUsage {
 		t.Fatalf("-seen on a send: exit %d", code)
+	}
+}
+
+// When blocks pass faster than trees are mined, postage ages out as fast
+// as it is paid for. fund stops after the trees the window and the target
+// can account for, and says so, instead of minting without end.
+func TestFundStopsWhenBlocksOutrunTrees(t *testing.T) {
+	c := testchain.New(700)
+	var fast atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		before := len(c.Txids())
+		c.ServeHTTP(w, req)
+		// Two more blocks on top of every transaction the chain takes:
+		// a tree is two blocks old, out of a window of one, as soon as
+		// it is mined.
+		if fast.Load() && len(c.Txids()) > before {
+			if _, err := c.Generate(2, "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"); err != nil {
+				t.Error(err)
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	r := &rig{t: t, chain: c, url: srv.URL, rx: []string{"-network", "regtest", "-headers", srv.URL, "-chain", "asset:" + srv.URL}}
+	r.home = r.newHome(1)
+	trees := func() int {
+		_, o, _ := cat(t, nil, "status", "-home", r.home)
+		return strings.Count(string(o), "\ntree ")
+	}
+	// The postage the home starts with is out of the window.
+	r.mine(2)
+	before := trees()
+	fast.Store(true)
+	code, _, e := cat(t, nil, "fund", "-home", r.home, "-n", "1", "-max-age", "1")
+	if code == 0 || code == exitUsage || !strings.Contains(e, "blocks are passing faster than trees are mined") {
+		t.Fatalf("fund against a fast chain: %d\n%s", code, e)
+	}
+	// One tree for the target, one of slack, and the two the window holds.
+	if n := trees() - before; n != 4 || !strings.Contains(e, "minted 4 tree(s)") {
+		t.Fatalf("minted %d tree(s), want 4\n%s", n, e)
+	}
+	// On a chain that keeps pace again, the same command reaches the target.
+	fast.Store(false)
+	if code, o, e := cat(t, nil, "fund", "-home", r.home, "-n", "1", "-max-age", "1"); code != 0 || !strings.Contains(string(o), "postage for 1 carrier(s) no more than 1 block(s) old") {
+		t.Fatalf("fund after: %d\n%s%s", code, o, e)
 	}
 }
 
