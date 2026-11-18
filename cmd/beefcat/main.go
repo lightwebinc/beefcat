@@ -68,8 +68,9 @@ Every chunk of data rides one carrier: a transaction that can never be
 mined, signed by the sender, spending one mined funding output. The far end
 checks each carrier against block headers it fetches itself, and writes a
 carrier's data only after that carrier verified. Data that does not verify,
-a sender who is not the one pinned, a stream cut short, and data its sender
-retracted are refused loudly, with a nonzero exit status:
+a sender who is not the one pinned, a stream cut short, data its sender
+retracted, and, when asked for, postage too old (-max-age) or a stream
+taken before (-seen) are refused loudly, with a nonzero exit status:
 
   0  verified        3  refused: the data did not verify
   1  no verdict      4  refused: the sender is not one you pinned

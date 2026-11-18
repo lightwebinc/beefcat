@@ -163,10 +163,12 @@ func (g *global) printIdentity(e *bwallet.Embedded) error {
 const statusHelp = `usage: beefcat status
 
 Print the home: its identity key (what a receiver pins with -k), fund
-address, coin pool and the postage left. Reads only.`
+address, coin pool and the postage left. Reads only. With -age it asks
+the header source for its tip and prints how old each tree's postage is.`
 
-func cmdStatus(_ context.Context, g *global, args []string) error {
+func cmdStatus(ctx context.Context, g *global, args []string) error {
 	fs := g.flagSet("status", statusHelp)
+	age := fs.Bool("age", false, "ask the header source for its tip, and print each tree's age in blocks")
 	if pos, err := g.parse(fs, args); err != nil {
 		return err
 	} else if len(pos) > 0 {
@@ -180,6 +182,17 @@ func cmdStatus(_ context.Context, g *global, args []string) error {
 	if err != nil {
 		return err
 	}
+	tip, haveTip := uint32(0), false
+	if *age {
+		hc, err := g.headerClient()
+		if err != nil {
+			return err
+		}
+		if tip, err = hc.CurrentHeight(ctx); err != nil {
+			return fmt.Errorf("-age: the header source %s did not give its tip: %w", g.cfg.Headers, err)
+		}
+		haveTip = true
+	}
 	out := g.stdout
 	fmt.Fprintf(out, "home         %s\nnetwork      %s\n", g.home, g.cfg.Network)
 	if err := g.printIdentity(e); err != nil {
@@ -190,6 +203,13 @@ func cmdStatus(_ context.Context, g *global, args []string) error {
 	fmt.Fprintf(out, "postage      %d carrier(s) left (up to %d bytes of data)\n", st.Remaining(), st.Remaining()*wire.MaxData)
 	for _, t := range st.Trees {
 		state := fmt.Sprintf("mined at height %d", t.Height)
+		if haveTip && t.BumpHex != "" {
+			old := uint32(0)
+			if tip > t.Height {
+				old = tip - t.Height
+			}
+			state += fmt.Sprintf(", %d block(s) old at tip %d", old, tip)
+		}
 		if t.BumpHex == "" {
 			state = "not mined yet"
 		}
@@ -395,6 +415,8 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 	beef := fs.String("beef", "", "import this payment's BEEF first: a file, or - for standard input")
 	coinbase := fs.Bool("coinbase", false, "coinbase: only on a regtest chain you run (development and tests); mine 101 blocks to the fund address first")
 	wait := fs.Duration("wait", 30*time.Minute, "how long to wait for the block that mines the tree")
+	var maxAge blockSpan
+	fs.Var(&maxAge, "max-age", "count only postage no older than this toward N, and mint what is missing. "+maxAgeUsage)
 	pos, err := g.parse(fs, args)
 	if err != nil {
 		return err
@@ -461,8 +483,61 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 		}
 		g.say("mined coinbase: %d output(s) added; pool %d output(s), %d sat", added, h.e.Pool.Count(), h.e.Pool.Balance())
 	}
-	for h.st.Remaining() < uint64(*n) { //nolint:gosec // checked non-negative
-		count := int(uint64(*n) - h.st.Remaining()) //nolint:gosec // checked non-negative
+	// With -max-age, postage too old for a far end that limits its age
+	// does not count: what is missing is minted fresh, and the old stays.
+	// The cutoff is taken again after every tree, since each costs a block.
+	minHeight, ageFlag := uint32(0), ""
+	minted, nextMin := 0, uint32(0)
+	mostTrees := (*n+mint.MaxFundingOutputs-1)/mint.MaxFundingOutputs + 1
+	if uint64(maxAge) < 1<<20 {
+		mostTrees += int(maxAge) + 1
+	}
+	cutoff := func() error {
+		if maxAge == 0 {
+			return nil
+		}
+		tip, err := e.hc.CurrentHeight(ctx)
+		if err != nil {
+			return fmt.Errorf("-max-age: the header source %s did not give its tip: %w", g.cfg.Headers, err)
+		}
+		minHeight, nextMin = 0, 0
+		if tip > uint32(maxAge) {
+			minHeight = tip - uint32(maxAge)
+		}
+		if tip+1 > uint32(maxAge) {
+			nextMin = tip + 1 - uint32(maxAge)
+		}
+		return nil
+	}
+	if maxAge > 0 {
+		ageFlag = fmt.Sprintf(" -max-age %d", maxAge)
+		// A tree is mined in a block of its own, so a window of maxAge
+		// blocks holds at most maxAge+1 trees. A target beyond that is
+		// never reached, and every tree minted toward it would be paid
+		// for and aged out.
+		if most := (uint64(maxAge) + 1) * mint.MaxFundingOutputs; uint64(*n) > most { //nolint:gosec // checked non-negative
+			return usage("-n %d -max-age %d: postage no more than %d block(s) old is at most %d tree(s) of %d output(s), %d carrier(s); nothing was minted", *n, maxAge, maxAge, uint64(maxAge)+1, mint.MaxFundingOutputs, most)
+		}
+	}
+	for {
+		if err := cutoff(); err != nil {
+			return err
+		}
+		young := h.st.RemainingFrom(minHeight)
+		if young >= uint64(*n) { //nolint:gosec // checked non-negative
+			break
+		}
+		// Postage the home held can age out while a tree is mined, and is
+		// then minted again: at a block a tree, that is at most the trees
+		// the window holds, on top of the trees the target takes. Past
+		// that, blocks are passing faster than trees are mined, and
+		// postage ages out as fast as it is paid for.
+		if maxAge > 0 && minted >= mostTrees {
+			return fmt.Errorf("minted %d tree(s) and the home has postage for %d carrier(s) no more than %d block(s) old, not %d: blocks are passing faster than trees are mined. Nothing more was minted; a longer -max-age, or a smaller -n, can be reached", minted, young, maxAge, *n)
+		}
+		// The tree is mined a block from now, when the window has moved
+		// on by one: it is sized against the postage still inside then.
+		count := int(uint64(*n) - h.st.RemainingFrom(nextMin)) //nolint:gosec // checked non-negative
 		if count > mint.MaxFundingOutputs {
 			count = mint.MaxFundingOutputs
 		}
@@ -473,18 +548,24 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 			if errors.As(err, &nc) {
 				addr, _ := h.e.FundAddress(h.e.Mainnet)
 				if nc.Held > 0 {
-					return fmt.Errorf("the pool's coin is change from %d transaction(s) not mined yet: run `beefcat fund` again after the next block", nc.Held)
+					return fmt.Errorf("the pool's coin is change from %d transaction(s) not mined yet: run `beefcat fund%s` again after the next block", nc.Held, ageFlag)
 				}
-				return fmt.Errorf("the pool cannot pay for a tree of %d output(s), about %d sat: send a payment to the fund address %s from your own wallet, then `beefcat fund -n %d -txid <its txid>`", count, treeCost(count), addr, *n)
+				return fmt.Errorf("the pool cannot pay for a tree of %d output(s), about %d sat: send a payment to the fund address %s from your own wallet, then `beefcat fund -n %d%s -txid <its txid>`", count, treeCost(count), addr, *n, ageFlag)
 			}
 			if len(h.st.Pending) > 0 {
-				return fmt.Errorf("%w\nthe tree may still be mined: run `beefcat fund -n %d` again later, which asks what became of it and mints nothing twice", err, *n)
+				return fmt.Errorf("%w\nthe tree may still be mined: run `beefcat fund -n %d%s` again later, which asks what became of it and mints nothing twice", err, *n, ageFlag)
 			}
 			return err
 		}
+		minted++
 		if len(h.st.Trees) == before || h.st.Trees[len(h.st.Trees)-1].BumpHex == "" {
-			return errors.New("the funding tree was broadcast and is not recorded as mined; run `beefcat fund` again")
+			return fmt.Errorf("the funding tree was broadcast and is not recorded as mined; run `beefcat fund%s` again", ageFlag)
 		}
+	}
+	if maxAge > 0 {
+		fmt.Fprintf(g.stdout, "postage for %d carrier(s) no more than %d block(s) old, %d in all; pool %d output(s), %d sat\n",
+			h.st.RemainingFrom(minHeight), maxAge, h.st.Remaining(), h.e.Pool.Count(), h.e.Pool.Balance())
+		return nil
 	}
 	fmt.Fprintf(g.stdout, "postage for %d carrier(s), up to %d bytes of data; pool %d output(s), %d sat\n",
 		h.st.Remaining(), h.st.Remaining()*wire.MaxData, h.e.Pool.Count(), h.e.Pool.Balance())

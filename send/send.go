@@ -49,6 +49,9 @@ type Sender struct {
 	// Workers is how many carriers are signed at once; zero is one per
 	// core, at most 16.
 	Workers int
+	// MinHeight, when not zero, spends only funding trees mined at that
+	// height or above: postage a far end that limits its age still takes.
+	MinHeight uint32
 
 	trees map[string]*transaction.Transaction
 }
@@ -89,7 +92,7 @@ func (s *Sender) Stream(ctx context.Context, r io.Reader, w io.Writer) (Stats, e
 	if _, err := rand.Read(st.Stream[:]); err != nil {
 		return st, err
 	}
-	if s.State.NextTree() == nil {
+	if s.State.NextTreeFrom(s.MinHeight) == nil {
 		return st, ErrNoPostage
 	}
 	if err := wire.WritePreamble(w); err != nil {
@@ -264,7 +267,7 @@ func readChunk(r io.Reader, b []byte) (int, error) {
 // take marks the next funding output spent, saves the state, and returns
 // the tree and the output. Only the reading goroutine calls it.
 func (s *Sender) take(size int) (*transaction.Transaction, uint32, error) {
-	t := s.State.NextTree()
+	t := s.State.NextTreeFrom(s.MinHeight)
 	if t == nil {
 		return nil, 0, ErrNoPostage
 	}

@@ -44,9 +44,10 @@ Postage is a setup cost, not a fee per message. beefcat spends one funded
 output per carrier and never spends one twice, and enough of them for a
 gigabyte costs about 1,800 satoshis in miner fees. But a carrier is never
 mined, so nothing on the chain records that an output was used: the same
-stream can go to any number of receivers at no further cost, and a
-receiver, which keeps no memory, cannot tell an output that backed an
-earlier stream. What the proof shows is that the sender's key paid to
+stream can go to any number of receivers at no further cost. A receiver
+that must take a stream only once keeps its own record of the outputs it
+accepted (`-seen`), and one that wants recent postage limits its age
+(`-max-age`); both are off unless asked for. What the proof shows is that the sender's key paid to
 exist on the chain, not what any one message cost.
 
 The proof is of a transaction that was mined, not of outputs that are
@@ -67,6 +68,8 @@ carrier that failed, prints a banner, and exits nonzero:
 | Stream cut short, reordered, spliced or appended to | `REFUSED-TRUNCATED`, `REFUSED-SEQ` | 3 |
 | A transaction that could be mined, passed off as a carrier | `REFUSED-MINEABLE` | 3 |
 | Data its sender retracted (with `-unspent`) | `REFUSED-RETRACTED` | 3 |
+| Postage older than you allow, or not deep enough (with `-max-age`, `-min-conf`) | `REFUSED-STALE` | 3 |
+| A stream this receiver took before (with `-seen`) | `REFUSED-REPLAY` | 3 |
 | Verified, but not from a sender you pinned | `REFUSED-UNTRUSTED` | 4 |
 | The header source did not answer: no verdict | `ERROR` | 1 |
 

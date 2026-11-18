@@ -35,6 +35,10 @@ func headline(c verify.Code) string {
 		return "STREAM CUT SHORT"
 	case recv.RefusedRetracted:
 		return "DATA RETRACTED BY ITS SENDER"
+	case recv.RefusedStale:
+		return "POSTAGE TOO OLD, OR NOT DEEP ENOUGH IN THE CHAIN"
+	case recv.RefusedReplay:
+		return "REPLAY: THIS DATA WAS ACCEPTED BEFORE"
 	case recv.RefusedUntrusted:
 		return "UNTRUSTED SENDER"
 	}

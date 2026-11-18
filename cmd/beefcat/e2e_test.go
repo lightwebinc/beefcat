@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +38,7 @@ import (
 
 	"github.com/lightwebinc/beefcat/internal/home"
 	"github.com/lightwebinc/beefcat/internal/peerpay"
+	"github.com/lightwebinc/beefcat/internal/seen"
 	"github.com/lightwebinc/beefcat/send"
 	"github.com/lightwebinc/beefcat/wire"
 )
@@ -1086,5 +1089,334 @@ func TestNoPostageSpentAfterSendReturns(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := h.st.Remaining(); got != left {
 		t.Fatalf("postage went from %d to %d after the send returned", left, got)
+	}
+}
+
+// mine adds n blocks to the rig's chain.
+func (r *rig) mine(n int) {
+	r.t.Helper()
+	if _, err := r.chain.Generate(n, "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// A stream that verified once verifies again, unless the receiver keeps a
+// record of the funding outputs it accepted.
+func TestReplay(t *testing.T) {
+	r := newRig(t, 8)
+	data := random(2500)
+	s := r.stream(data, "-chunk", "1000")
+	seenFile := filepath.Join(t.TempDir(), "seen")
+
+	// Without a record a stream is taken twice, and the summary says so.
+	for range 2 {
+		if code, out, e := r.verify(s, "-k", r.key); code != 0 || !bytes.Equal(out, data) || !strings.Contains(e, "replay      not checked") {
+			t.Fatalf("with no record: exit %d\n%s", code, e)
+		}
+	}
+	code, out, e := r.verify(s, "-k", r.key, "-seen", seenFile)
+	if code != 0 || !bytes.Equal(out, data) || !strings.Contains(e, "every funding output new to your record") {
+		t.Fatalf("first: exit %d\n%s", code, e)
+	}
+	if !strings.Contains(e, "-seen without -max-age") {
+		t.Fatalf("a record that grows forever was not mentioned:\n%s", e)
+	}
+	if st, err := os.Stat(seenFile); err != nil || st.Size() != 8+3*72 {
+		t.Fatalf("the record: %v, %v", st, err)
+	}
+	code, out, e = r.verify(s, "-k", r.key, "-seen", seenFile)
+	if out = refused(t, "REFUSED-REPLAY", code, out, e); len(out) != 0 {
+		t.Fatalf("a replay wrote %d bytes", len(out))
+	}
+	if !strings.Contains(e, "REPLAY: THIS DATA WAS ACCEPTED BEFORE") {
+		t.Fatalf("no headline:\n%s", e)
+	}
+	// A replay from a sender who is not pinned is still a replay: the pin
+	// is asked last.
+	stranger := r.identity(r.newHome(1))
+	code, out, e = r.verify(s, "-k", stranger, "-seen", seenFile)
+	refused(t, "REFUSED-REPLAY", code, out, e)
+
+	// A new stream from the same sender is taken, and a stream cut short
+	// leaves the outputs of the carriers accepted in the record.
+	s2 := r.stream(data, "-chunk", "1000")
+	fr := frames(t, s2)
+	code, out, e = r.verify(join(fr[0], fr[1]), "-k", r.key, "-seen", seenFile)
+	if out = refused(t, "REFUSED-TRUNCATED", code, out, e); !bytes.Equal(out, data[:2000]) {
+		t.Fatalf("the cut stream wrote %d bytes", len(out))
+	}
+	code, out, e = r.verify(s2, "-k", r.key, "-seen", seenFile)
+	if out = refused(t, "REFUSED-REPLAY", code, out, e); len(out) != 0 {
+		t.Fatal("the whole of a stream whose start was taken was written")
+	}
+
+	// A record another command holds is not shared.
+	l, err := seen.Open(seenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out, e := r.verify(s, "-seen", seenFile); code != exitError || len(out) != 0 || !strings.Contains(e, "in use by another beefcat command") {
+		t.Fatalf("a held record: exit %d\n%s", code, e)
+	}
+	l.Close()
+}
+
+// Two carriers signed on one funding output, sent as two streams: the
+// receiver's record catches what one stream alone cannot show.
+func TestForkAcrossStreams(t *testing.T) {
+	r := newRig(t, 2)
+	f := newForge(t, r)
+	rec := f.h.st.Trees[0]
+	tree, err := funding.Rebuild(rec.RawHex, rec.BumpHex, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenFile := filepath.Join(t.TempDir(), "seen")
+	one := join(f.carrier(tree, 0, "first", true))
+	f.seq = 0
+	two := join(f.carrier(tree, 0, "second", true))
+	if code, out, e := r.verify(one, "-k", r.key, "-seen", seenFile); code != 0 || string(out) != "first" {
+		t.Fatalf("exit %d\n%s", code, e)
+	}
+	code, out, e := r.verify(two, "-k", r.key, "-seen", seenFile)
+	if out = refused(t, "REFUSED-FORK", code, out, e); len(out) != 0 {
+		t.Fatalf("wrote %q", out)
+	}
+	if !strings.Contains(e, "under another carrier") {
+		t.Fatalf("the refusal does not say why:\n%s", e)
+	}
+}
+
+// Postage has a height, and a receiver may hold it to one: no older than a
+// limit, and no shallower than a depth.
+func TestPostageAge(t *testing.T) {
+	r := newRig(t, 8)
+	data := random(100)
+	s := r.stream(data)
+
+	// Fresh postage has one confirmation: the block that mined it.
+	code, out, e := r.verify(s, "-k", r.key, "-min-conf", "3")
+	if out = refused(t, "REFUSED-STALE", code, out, e); len(out) != 0 || !strings.Contains(e, "not deep enough yet") {
+		t.Fatalf("shallow postage:\n%s", e)
+	}
+	if code, out, e := r.verify(s, "-k", r.key, "-max-age", "3"); code != 0 || !bytes.Equal(out, data) || !strings.Contains(e, "at most 0 block(s) below tip") {
+		t.Fatalf("fresh postage: exit %d\n%s", code, e)
+	}
+	r.mine(2)
+	if code, out, e := r.verify(s, "-k", r.key, "-min-conf", "3", "-max-age", "3"); code != 0 || !bytes.Equal(out, data) || !strings.Contains(e, "at most 2 block(s) below tip") || !strings.Contains(e, "limit 3, at least 3 confirmation(s)") {
+		t.Fatalf("two blocks on: exit %d\n%s", code, e)
+	}
+	r.mine(2)
+	code, out, e = r.verify(s, "-k", r.key, "-max-age", "3")
+	if out = refused(t, "REFUSED-STALE", code, out, e); len(out) != 0 || !strings.Contains(e, "its postage is too old") {
+		t.Fatalf("old postage:\n%s", e)
+	}
+	// A duration is blocks at ten minutes each, rounded up: 25m is 3.
+	code, out, e = r.verify(s, "-k", r.key, "-max-age", "25m")
+	refused(t, "REFUSED-STALE", code, out, e)
+	if code, out, e := r.verify(s, "-k", r.key, "-max-age", "1h"); code != 0 || !bytes.Equal(out, data) || !strings.Contains(e, "limit 6") {
+		t.Fatalf("-max-age 1h: exit %d\n%s", code, e)
+	}
+	// Without a limit nothing is asked of the tip, and the summary says so.
+	if code, _, e := r.verify(s, "-k", r.key); code != 0 || !strings.Contains(e, "age         not checked") {
+		t.Fatalf("exit %d\n%s", code, e)
+	}
+	// Age is asked before the pin: stale data from a stranger is stale.
+	stranger := r.identity(r.newHome(1))
+	code, out, e = r.verify(s, "-k", stranger, "-max-age", "3")
+	refused(t, "REFUSED-STALE", code, out, e)
+	if code, _, e := r.verify(s, "-max-age", "soon"); code != exitUsage {
+		t.Fatalf("-max-age soon: exit %d\n%s", code, e)
+	}
+
+	// A header source that proves roots and will not give its tip leaves
+	// no verdict: an outage is not a refusal.
+	noTip := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
+		if q.URL.Path == "/v1/tip" {
+			http.Error(w, "no", http.StatusServiceUnavailable)
+			return
+		}
+		r.chain.ServeHTTP(w, q)
+	}))
+	defer noTip.Close()
+	code, out, e = cat(t, s, "verify", "-network", "regtest", "-headers", noTip.URL, "-k", r.key, "-max-age", "3")
+	if code != exitError || len(out) != 0 || !strings.Contains(e, "BEEFCAT REACHED NO VERDICT") || strings.Contains(e, "REFUSED-") {
+		t.Fatalf("no tip: exit %d\n%s", code, e)
+	}
+}
+
+// A receiver that limits age forgets the outputs too old to be taken.
+func TestSeenForgetsOldOutputs(t *testing.T) {
+	r := newRig(t, 4)
+	seenFile := filepath.Join(t.TempDir(), "seen")
+	s := r.stream(random(10))
+	if code, _, e := r.verify(s, "-k", r.key, "-seen", seenFile, "-max-age", "2"); code != 0 || strings.Contains(e, "grows") {
+		t.Fatalf("exit %d\n%s", code, e)
+	}
+	r.mine(3)
+	code, out, e := r.verify(s, "-k", r.key, "-seen", seenFile, "-max-age", "2")
+	refused(t, "REFUSED-STALE", code, out, e)
+	if !strings.Contains(e, "forgot 1 funding output(s)") {
+		t.Fatalf("the old output was kept:\n%s", e)
+	}
+	// The record holds no output now, only the height it was cleared to.
+	if st, err := os.Stat(seenFile); err != nil || st.Size() != 8+72 {
+		t.Fatalf("the record: %v, %v", st, err)
+	}
+	// What the record forgot it does not take again: not under a longer
+	// limit, and not from a header source whose tip has fallen back to
+	// where the postage was young.
+	code, out, e = r.verify(s, "-k", r.key, "-seen", seenFile, "-max-age", "100")
+	if out = refused(t, "REFUSED-STALE", code, out, e); len(out) != 0 || !strings.Contains(e, "was cleared of older ones") {
+		t.Fatalf("a forgotten output under a longer limit:\n%s", e)
+	}
+	low := r.chain.Height() - 3
+	fallen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
+		if q.URL.Path == "/v1/tip" {
+			fmt.Fprintf(w, `{"height":%d}`, low)
+			return
+		}
+		r.chain.ServeHTTP(w, q)
+	}))
+	defer fallen.Close()
+	code, out, e = cat(t, s, "verify", "-network", "regtest", "-headers", fallen.URL, "-k", r.key, "-seen", seenFile, "-max-age", "2")
+	if out = refused(t, "REFUSED-STALE", code, out, e); len(out) != 0 || !strings.Contains(e, "was cleared of older ones") {
+		t.Fatalf("a forgotten output under a tip that fell:\n%s", e)
+	}
+	// Without the record the same stream, under that tip, is young.
+	if code, _, e := cat(t, s, "verify", "-network", "regtest", "-headers", fallen.URL, "-k", r.key, "-max-age", "2"); code != 0 {
+		t.Fatalf("the fallen tip does not make the postage young: %d\n%s", code, e)
+	}
+}
+
+// A sender told the far end's limit spends only postage young enough, and
+// says so loudly when it has none.
+func TestSendMaxAge(t *testing.T) {
+	r := newRig(t, 2)
+	r.mine(5)
+	out := filepath.Join(t.TempDir(), "s")
+	code, _, e := cat(t, []byte("hello"), "-home", r.home, "-o", out, "-max-age", "2")
+	if code == 0 || !strings.Contains(e, "all of it more than 2 block(s) below tip") || !strings.Contains(e, "beefcat fund -max-age 2") {
+		t.Fatalf("a send on old postage: %d\n%s", code, e)
+	}
+	if _, o, _ := cat(t, nil, "status", "-home", r.home); !strings.Contains(string(o), "postage      2 carrier(s) left") {
+		t.Fatalf("postage was spent:\n%s", o)
+	}
+	if _, o, _ := cat(t, nil, "status", "-home", r.home, "-age"); !strings.Contains(string(o), "5 block(s) old at tip") {
+		t.Fatalf("status -age:\n%s", o)
+	}
+	// fund counts only young postage toward N, and mints the rest.
+	if code, o, e := cat(t, nil, "fund", "-home", r.home, "-n", "2", "-max-age", "2"); code != 0 || !strings.Contains(string(o), "postage for 2 carrier(s) no more than 2 block(s) old, 4 in all") {
+		t.Fatalf("fund -max-age: %d\n%s%s", code, o, e)
+	}
+	// The young tree is spent, not the old one ahead of it.
+	if code, _, e := cat(t, []byte("hello"), "-home", r.home, "-o", out, "-max-age", "2"); code != 0 || !strings.Contains(e, "postage left for 1 carrier(s)") {
+		t.Fatalf("send: %d\n%s", code, e)
+	}
+	s, _ := os.ReadFile(out)
+	if code, o, e := r.verify(s, "-k", r.key, "-max-age", "2"); code != 0 || string(o) != "hello" {
+		t.Fatalf("verify: %d\n%s", code, e)
+	}
+	// A file too large for the young postage is refused before a spend.
+	code, _, e = cat(t, random(3000), "-home", r.home, "-chunk", "1000", "-o", out, "-max-age", "2")
+	if code == 0 || !strings.Contains(e, "takes 3 carrier(s) and the home has postage for 1 no more than 2 block(s) old") {
+		t.Fatalf("exit %d\n%s", code, e)
+	}
+	// Postage that ages out while the first tree is mined is minted again
+	// in the same run: the young tree's one spare output is a block old,
+	// and the tree of two that tops it up puts it out of the window.
+	r.mine(1)
+	if code, o, e := cat(t, nil, "fund", "-home", r.home, "-n", "3", "-max-age", "1"); code != 0 || !strings.Contains(string(o), "postage for 3 carrier(s) no more than 1 block(s) old") {
+		t.Fatalf("fund across a window: %d\n%s%s", code, o, e)
+	}
+	// A tree is sized for the window it is mined into, not the one it was
+	// asked in. The three young outputs are a block old now and will be
+	// two old when the tree is mined, out of a window of one, so the tree
+	// is of four and one tree reaches the target.
+	trees := func() int {
+		_, o, _ := cat(t, nil, "status", "-home", r.home)
+		return strings.Count(string(o), "\ntree ")
+	}
+	r.mine(1)
+	before := trees()
+	if code, o, e := cat(t, nil, "fund", "-home", r.home, "-n", "4", "-max-age", "1"); code != 0 || trees() != before+1 || !strings.Contains(string(o), "postage for 4 carrier(s) no more than 1 block(s) old") {
+		t.Fatalf("fund -n 4 -max-age 1: %d, %d tree(s) more\n%s%s", code, trees()-before, o, e)
+	}
+	// A target the window cannot hold is refused before anything is minted.
+	if code, _, e := cat(t, nil, "fund", "-home", r.home, "-n", "2047", "-max-age", "1"); code != exitUsage || !strings.Contains(e, "nothing was minted") {
+		t.Fatalf("fund -n 2047 -max-age 1: %d\n%s", code, e)
+	}
+	// The flags of a receiver are refused on a send.
+	if code, _, _ := cat(t, []byte("x"), "-home", r.home, "-o", out, "-seen", "f"); code != exitUsage {
+		t.Fatalf("-seen on a send: exit %d", code)
+	}
+}
+
+// When blocks pass faster than trees are mined, postage ages out as fast
+// as it is paid for. fund stops after the trees the window and the target
+// can account for, and says so, instead of minting without end.
+func TestFundStopsWhenBlocksOutrunTrees(t *testing.T) {
+	c := testchain.New(700)
+	var fast atomic.Bool
+	var outran atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		before := len(c.Txids())
+		c.ServeHTTP(w, req)
+		// Two more blocks on top of every transaction the chain takes:
+		// a tree is two blocks old, out of a window of one, as soon as
+		// it is mined.
+		// Past twice the trees fund may mint, the chain keeps pace again:
+		// a fund with no bound then reaches its target and fails the test
+		// below, where it would otherwise mint until the test timed out.
+		if fast.Load() && len(c.Txids()) > before && outran.Add(1) <= 8 {
+			if _, err := c.Generate(2, "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"); err != nil {
+				t.Error(err)
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	r := &rig{t: t, chain: c, url: srv.URL, rx: []string{"-network", "regtest", "-headers", srv.URL, "-chain", "asset:" + srv.URL}}
+	r.home = r.newHome(1)
+	trees := func() int {
+		_, o, _ := cat(t, nil, "status", "-home", r.home)
+		return strings.Count(string(o), "\ntree ")
+	}
+	// The postage the home starts with is out of the window.
+	r.mine(2)
+	before := trees()
+	fast.Store(true)
+	code, _, e := cat(t, nil, "fund", "-home", r.home, "-n", "1", "-max-age", "1")
+	if code == 0 || code == exitUsage || !strings.Contains(e, "blocks are passing faster than trees are mined") {
+		t.Fatalf("fund against a fast chain: %d\n%s", code, e)
+	}
+	// One tree for the target, one of slack, and the two the window holds.
+	if n := trees() - before; n != 4 || !strings.Contains(e, "minted 4 tree(s)") {
+		t.Fatalf("minted %d tree(s), want 4\n%s", n, e)
+	}
+	// On a chain that keeps pace again, the same command reaches the target.
+	fast.Store(false)
+	if code, o, e := cat(t, nil, "fund", "-home", r.home, "-n", "1", "-max-age", "1"); code != 0 || !strings.Contains(string(o), "postage for 1 carrier(s) no more than 1 block(s) old") {
+		t.Fatalf("fund after: %d\n%s%s", code, o, e)
+	}
+}
+
+// Over TCP the verdict line tells the sender what the far end held the
+// stream to.
+func TestTCPVerdictSaysWhatWasChecked(t *testing.T) {
+	r := newRig(t, 4)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := fmt.Sprint(l.Addr().(*net.TCPAddr).Port)
+	l.Close()
+	seenFile := filepath.Join(t.TempDir(), "seen")
+	done := listenOnce(t, r, p, "-k", r.key, "-seen", seenFile, "-max-age", "6")
+	code, e := dial(t, []byte("hello"), "-home", r.home, "127.0.0.1", p)
+	if code != 0 || !strings.Contains(e, "the far end says: VERIFIED carriers=1 bytes=5 age=0 replay=checked") {
+		t.Fatalf("send: %d\n%s", code, e)
+	}
+	if rc, out, re := done(); rc != 0 || string(out) != "hello" {
+		t.Fatalf("receive: %d\n%s", rc, re)
 	}
 }

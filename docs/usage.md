@@ -30,12 +30,18 @@ A receiver needs no home, no key and no coin. A sender needs a home
 | `-chunk SIZE` | `4M` | data per carrier, at most 4M; bytes, or with `K` or `M` |
 | `-lines` | off | one carrier per line of input, sent as each line arrives |
 | `-w DURATION` | `2m` | how long to wait for the far end to take a write, and for its verdict |
+| `-max-age N` | no limit | spend only postage mined no more than N blocks below the header source's tip; a duration such as `24h` is taken at ten minutes a block |
 
 One carrier spends one funding output. Standard input is cut into chunks
 of `-chunk` bytes; the last carrier is signed as the last. With a file on
 standard input the size is known, and a send the home's postage cannot
 finish is refused before anything is spent. With a pipe, a send that runs
 out of postage stops, and the far end refuses the stream as cut short.
+
+`-max-age` is for a far end that limits the age of postage. The send
+asks the header source for its tip, skips trees older than the limit,
+and is refused before anything is spent when no postage is young enough.
+`beefcat fund -max-age N` mints what is missing.
 
 `-lines` is for a conversation: each line goes out as soon as it is read
 and costs one funding output, and the end of input costs one more for the
@@ -56,11 +62,27 @@ been spent.
 | `-k KEY` | none | the sender's identity key; repeat, or separate several with commas. Any other sender is refused |
 | `-unspent` | off | also ask the chain view whether each funding output is spent by another transaction, and refuse data its sender retracted |
 | `-save FILE` | | write the data to FILE only if the whole stream verified, instead of standard output; FILE must not exist |
+| `-max-age N` | no limit | refuse a carrier whose postage was mined more than N blocks below the header source's tip; a duration such as `24h` is taken at ten minutes a block |
+| `-min-conf N` | `1` | refuse postage with fewer than N confirmations; the block that mined it is the first |
+| `-seen FILE` | | keep a record in FILE of the funding outputs accepted, and refuse a carrier on one already there |
 | `-w DURATION` | `2m` | how long a silent connection is kept |
 
 `beefcat verify` takes the same flags and reads a stream from a file or
 standard input. What is checked, and how each failure is reported, is in
 [verification.md](verification.md).
+
+`-seen FILE` makes a receiver take a stream once. FILE is created when it
+is not there, holds 72 bytes per carrier accepted, and is used by one
+receiver at a time (`FILE.lock` beside it). Each output is recorded
+before its carrier's data is written. Without `-max-age` the file grows
+forever, and beefcat says so on every run. With it, outputs older than
+the limit are dropped each time the file is opened (a listener's file
+when it starts, against the tip then; its stream is measured against
+the tip when it arrives), and postage mined
+below the height the file was cleared to is refused from then on, even
+by a run with a longer limit. A receiver that restarts for each
+stream, as `-l` does, shares one FILE across its runs; another receiver
+with another file knows nothing of it.
 
 `-l PORT` listens on every address. Give an address to listen on one:
 `-l 127.0.0.1:9000`. A listener takes the first connection and exits
@@ -85,7 +107,7 @@ send as you. Back it up, and keep it private.
 ### fund
 
 ```text
-beefcat fund [-n N] [-txid TXID | -beef FILE|-] [-wait DURATION]
+beefcat fund [-n N] [-max-age N] [-txid TXID | -beef FILE|-] [-wait DURATION]
 ```
 
 Makes sure the home has postage for N carriers (default 64). It mints one
@@ -109,10 +131,20 @@ fund address from your own wallet, then import that payment:
 
 `fund -n 0 -txid TXID` imports a payment and mints nothing.
 
+With `-max-age N` only postage mined within N blocks of the tip counts
+toward `-n`, and what is missing is minted fresh. Older postage stays in
+the home and is still spent by a send without `-max-age`. A tree is
+mined in a block of its own, so N blocks hold at most N+1 trees: a `-n`
+above 1,023 times N+1 is refused. Postage that ages out while a tree is
+mined is minted again in the same run, up to the trees the window holds;
+a run in which blocks pass faster than trees are mined stops there.
+
 ### status
 
 Prints the home, network, identity key, fund address, sources, pool,
-postage left, each funding tree, and totals sent. It reads only.
+postage left, each funding tree, and totals sent. It reads only. With
+`-age` it asks the header source for its tip and prints how many blocks
+old each tree's postage is.
 
 ### sweep
 
@@ -186,11 +218,14 @@ choice, for the reasons in
 | Command | Reaches |
 | --- | --- |
 | send | the far end only |
+| send with `-max-age` | also the header source, once, for its tip |
 | receive, `verify` | the far end; the header source, at most once per carrier |
+| receive with `-max-age` or `-min-conf` | also the header source's tip, once per stream |
 | receive with `-unspent` | also the chain view, once per carrier |
 | `fund`, `sweep`, `withdraw` | the header source, the chain view and the settlement leg |
 | `withdraw` to an identity key | also the recipient's message box server |
 | `init`, `status` | nothing |
+| `status -age` | the header source, once, for its tip |
 
 ## Costs
 
@@ -202,8 +237,13 @@ receiver costs. beefcat itself spends one funding output per carrier and
 never one twice, so the table below is what its own sends consume. A
 carrier is never mined, though, so the chain keeps no record of an output
 having been used: one stream can be sent to any number of receivers for
-the postage of one, and a receiver cannot see an output that already
-backed another stream.
+the postage of one, and a receiver sees an output that already backed
+another stream only in its own record (`-seen`).
+
+A receiver that limits the age of postage (`-max-age`) changes this for
+its senders: postage older than the limit is worth nothing there, so a
+sender who keeps sending pays for a fresh tree every window. At a limit
+of 144 blocks, a day, the table below is a daily cost.
 
 A funding tree is one mined transaction of about 190 bytes plus 58 bytes
 per output. Each output holds one satoshi. At the network's rate of 100
@@ -246,6 +286,7 @@ of random data on a local chain:
 | --- | --- | --- |
 | Send to a file, 32-thread workstation | 0.9 s | about 1.2 GB/s |
 | Verify a file, same machine | 1.0 s | about 1.1 GB/s |
+| Verify the same file with `-seen FILE` on NVMe | 7 % longer | 256 records, made durable in groups |
 | Send over a 10 GbE link to a 16-thread host, verified there | 1.4 s | about 750 MB/s |
 
 The work is hashing, so a CPU without SHA extensions is several times
@@ -255,5 +296,6 @@ small transfer takes. A header service of your own removes it.
 
 The data is signed, not encrypted, and the connection is plain TCP.
 Anyone on the path can read it. Nobody on the path can change it
-unnoticed, though they can replay an older stream from the same sender:
+unnoticed, though they can replay an older stream from the same sender
+to a receiver that does not use `-seen` and `-max-age`:
 see [verification.md](verification.md#what-spv-cannot-tell-you).
