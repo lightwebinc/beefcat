@@ -1328,6 +1328,19 @@ func TestSendMaxAge(t *testing.T) {
 	if code, o, e := cat(t, nil, "fund", "-home", r.home, "-n", "3", "-max-age", "1"); code != 0 || !strings.Contains(string(o), "postage for 3 carrier(s) no more than 1 block(s) old") {
 		t.Fatalf("fund across a window: %d\n%s%s", code, o, e)
 	}
+	// A tree is sized for the window it is mined into, not the one it was
+	// asked in. The three young outputs are a block old now and will be
+	// two old when the tree is mined, out of a window of one, so the tree
+	// is of four and one tree reaches the target.
+	trees := func() int {
+		_, o, _ := cat(t, nil, "status", "-home", r.home)
+		return strings.Count(string(o), "\ntree ")
+	}
+	r.mine(1)
+	before := trees()
+	if code, o, e := cat(t, nil, "fund", "-home", r.home, "-n", "4", "-max-age", "1"); code != 0 || trees() != before+1 || !strings.Contains(string(o), "postage for 4 carrier(s) no more than 1 block(s) old") {
+		t.Fatalf("fund -n 4 -max-age 1: %d, %d tree(s) more\n%s%s", code, trees()-before, o, e)
+	}
 	// A target the window cannot hold is refused before anything is minted.
 	if code, _, e := cat(t, nil, "fund", "-home", r.home, "-n", "2047", "-max-age", "1"); code != exitUsage || !strings.Contains(e, "nothing was minted") {
 		t.Fatalf("fund -n 2047 -max-age 1: %d\n%s", code, e)

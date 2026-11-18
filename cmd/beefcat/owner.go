@@ -487,7 +487,7 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 	// does not count: what is missing is minted fresh, and the old stays.
 	// The cutoff is taken again after every tree, since each costs a block.
 	minHeight, ageFlag := uint32(0), ""
-	minted := 0
+	minted, nextMin := 0, uint32(0)
 	mostTrees := (*n+mint.MaxFundingOutputs-1)/mint.MaxFundingOutputs + 1
 	if uint64(maxAge) < 1<<20 {
 		mostTrees += int(maxAge) + 1
@@ -500,9 +500,12 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 		if err != nil {
 			return fmt.Errorf("-max-age: the header source %s did not give its tip: %w", g.cfg.Headers, err)
 		}
-		minHeight = 0
+		minHeight, nextMin = 0, 0
 		if tip > uint32(maxAge) {
 			minHeight = tip - uint32(maxAge)
+		}
+		if tip+1 > uint32(maxAge) {
+			nextMin = tip + 1 - uint32(maxAge)
 		}
 		return nil
 	}
@@ -532,7 +535,9 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 		if maxAge > 0 && minted >= mostTrees {
 			return fmt.Errorf("minted %d tree(s) and the home has postage for %d carrier(s) no more than %d block(s) old, not %d: blocks are passing faster than trees are mined. Nothing more was minted; a longer -max-age, or a smaller -n, can be reached", minted, young, maxAge, *n)
 		}
-		count := int(uint64(*n) - h.st.RemainingFrom(minHeight)) //nolint:gosec // checked non-negative
+		// The tree is mined a block from now, when the window has moved
+		// on by one: it is sized against the postage still inside then.
+		count := int(uint64(*n) - h.st.RemainingFrom(nextMin)) //nolint:gosec // checked non-negative
 		if count > mint.MaxFundingOutputs {
 			count = mint.MaxFundingOutputs
 		}
