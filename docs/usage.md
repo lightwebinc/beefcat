@@ -135,9 +135,9 @@ With `-max-age N` only postage mined within N blocks of the tip counts
 toward `-n`, and what is missing is minted fresh. Older postage stays in
 the home and is still spent by a send without `-max-age`. A tree is
 mined in a block of its own, so N blocks hold at most N+1 trees: a `-n`
-above 1,023 times N+1 is refused, and a run in which blocks pass faster
-than trees are mined stops after the first tree that brings it no
-nearer.
+above 1,023 times N+1 is refused. Postage that ages out while a tree is
+mined is minted again in the same run, up to the trees the window holds;
+a run in which blocks pass faster than trees are mined stops there.
 
 ### status
 

@@ -1321,6 +1321,13 @@ func TestSendMaxAge(t *testing.T) {
 	if code == 0 || !strings.Contains(e, "takes 3 carrier(s) and the home has postage for 1 no more than 2 block(s) old") {
 		t.Fatalf("exit %d\n%s", code, e)
 	}
+	// Postage that ages out while the first tree is mined is minted again
+	// in the same run: the young tree's one spare output is a block old,
+	// and the tree of two that tops it up puts it out of the window.
+	r.mine(1)
+	if code, o, e := cat(t, nil, "fund", "-home", r.home, "-n", "3", "-max-age", "1"); code != 0 || !strings.Contains(string(o), "postage for 3 carrier(s) no more than 1 block(s) old") {
+		t.Fatalf("fund across a window: %d\n%s%s", code, o, e)
+	}
 	// A target the window cannot hold is refused before anything is minted.
 	if code, _, e := cat(t, nil, "fund", "-home", r.home, "-n", "2047", "-max-age", "1"); code != exitUsage || !strings.Contains(e, "nothing was minted") {
 		t.Fatalf("fund -n 2047 -max-age 1: %d\n%s", code, e)
