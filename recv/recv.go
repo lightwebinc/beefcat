@@ -17,11 +17,17 @@
 //     output no earlier carrier of the stream spent;
 //  6. SPV: the input satisfies that output, and the path leads to a root
 //     the reader's own header source holds;
-//  7. when asked, the funding output is not spent by another transaction,
+//  7. when asked, the funding output was mined deep enough, and not longer
+//     ago than the reader allows, counted in blocks below the header
+//     source's tip;
+//  8. when asked, the funding output is not spent by another transaction,
 //     which is how a sender retracts;
-//  8. the sender is one the reader trusts, when the reader pinned any.
+//  9. when the reader keeps a record of the funding outputs it has
+//     accepted carriers on, this output is not in it;
+//  10. the sender is one the reader trusts, when the reader pinned any.
 //
-// Everything but 6 and 7 is arithmetic on the bytes received. A carrier
+// Everything but 6, 7 and 8 is arithmetic on the bytes received, and 9 on
+// what the reader itself recorded. A carrier
 // that fails is refused with a code from bcommon's verify vocabulary and
 // nothing of it is written; a stream that ends before its signed last
 // carrier is refused as truncated.
@@ -29,6 +35,7 @@ package recv
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -56,7 +63,29 @@ const (
 	RefusedRetracted verify.Code = "REFUSED-RETRACTED"
 	// RefusedUntrusted is a sender the reader did not pin.
 	RefusedUntrusted verify.Code = "REFUSED-UNTRUSTED"
+	// RefusedStale is a carrier whose funding output was mined longer ago
+	// than the reader allows, or not deep enough yet.
+	RefusedStale verify.Code = "REFUSED-STALE"
+	// RefusedReplay is a carrier the reader accepted before: the same
+	// carrier, on a funding output in the reader's record.
+	RefusedReplay verify.Code = "REFUSED-REPLAY"
 )
+
+// Outpoint names a funding output: its transaction id, as the chain hashes
+// it, and its output index, big-endian.
+type Outpoint = [36]byte
+
+// Seen is a reader's record of the funding outputs it has accepted
+// carriers on, kept across streams (internal/seen keeps one in a file).
+// Receive calls it from one goroutine.
+type Seen interface {
+	// Lookup reports the carrier recorded on an output, if any.
+	Lookup(o Outpoint) (carrier [32]byte, ok bool)
+	// Add records a carrier accepted on an output mined at height.
+	Add(o Outpoint, carrier [32]byte, height uint32) error
+	// Sync makes every record added so far durable.
+	Sync() error
+}
 
 // Options are a reader's choices.
 type Options struct {
@@ -68,8 +97,20 @@ type Options struct {
 	// Spends, when set, is asked whether each funding output is spent by
 	// another transaction.
 	Spends nodeapi.SpendSource
+	// MaxAge, when not zero, refuses a carrier whose funding output was
+	// mined more than that many blocks below the header source's tip.
+	MaxAge uint32
+	// MinConf, when above one, refuses a carrier whose funding output has
+	// fewer confirmations: the block that mined it counts as the first.
+	MinConf uint32
+	// Seen, when set, is asked whether each funding output was accepted
+	// before, and records each one accepted, durably, before that
+	// carrier's data is written.
+	Seen Seen
 	// Workers is how many carriers are checked at once; zero is one per
 	// core, at most 16. Each holds one carrier, so it also bounds memory.
+	// With Seen set, as many verified carriers again may be held while
+	// their records are made durable together.
 	Workers int
 }
 
@@ -91,6 +132,15 @@ type Summary struct {
 	Height uint32
 	// Unspent reports that every funding output was checked unspent.
 	Unspent bool
+	// AgeChecked reports that the postage's depth was held to MaxAge or
+	// MinConf. Tip is then the header source's tip the stream was measured
+	// against, and Age the most blocks any carrier's funding output lay
+	// below it.
+	AgeChecked bool
+	Tip, Age   uint32
+	// Replay reports that every funding output was checked against, and
+	// recorded in, the reader's record of outputs seen.
+	Replay bool
 }
 
 // Refusal is a verdict: the stream did not verify. Carrier is the index of
@@ -128,18 +178,6 @@ func Receive(ctx context.Context, r io.Reader, w io.Writer, o Options) (Summary,
 	if o.Headers == nil {
 		return s, verify.ErrNoTracker
 	}
-	refuse := func(code verify.Code, format string, args ...any) (Summary, error) {
-		return s, &Refusal{Code: code, Reason: fmt.Sprintf(format, args...), Carrier: s.Carriers}
-	}
-	failed := func(f *fail) (Summary, error) {
-		if f.err != nil {
-			return s, fmt.Errorf("carrier %d: %w", s.Carriers, f.err)
-		}
-		return refuse(f.code, "%s", f.reason)
-	}
-	if err := wire.ReadPreamble(r); err != nil {
-		return refuse(verify.RefusedDecode, "%v", err)
-	}
 	workers := o.Workers
 	if workers <= 0 {
 		workers = min(runtime.GOMAXPROCS(0), 16)
@@ -147,6 +185,66 @@ func Receive(ctx context.Context, r io.Reader, w io.Writer, o Options) (Summary,
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	headers := &memoTracker{t: o.Headers, roots: map[rootKey]*rootAnswer{}}
+
+	// Verified carriers wait in a batch for their records to be made
+	// durable together, and are written as soon as the next carrier is not
+	// ready: nothing verified waits on a carrier still being checked or
+	// still to arrive. Without a record there is nothing to wait for, and
+	// each is written as it is verified.
+	batchMax := 1
+	if o.Seen != nil {
+		batchMax = workers
+	}
+	var batch [][]byte
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if o.Seen != nil {
+			if err := o.Seen.Sync(); err != nil {
+				return fmt.Errorf("recording the funding outputs seen: %w", err)
+			}
+		}
+		for i, data := range batch {
+			if _, err := w.Write(data); err != nil {
+				return fmt.Errorf("writing carrier %d: %w", s.Carriers, err)
+			}
+			s.Carriers++
+			s.Bytes += int64(len(data))
+			batch[i] = nil
+		}
+		batch = batch[:0]
+		return nil
+	}
+	// The tip is asked once, of the reader's own header source, and only
+	// by a reader that holds postage to a depth.
+	var tip uint32
+	haveTip := false
+
+	// n counts the carriers accepted: those written and those in the batch.
+	n := 0
+	spent := map[string]bool{}
+	last := false
+	// A verdict is given only once everything accepted before it is
+	// recorded and written, so what it says was written, was.
+	refuse := func(code verify.Code, format string, args ...any) (Summary, error) {
+		if err := flush(); err != nil {
+			return s, err
+		}
+		return s, &Refusal{Code: code, Reason: fmt.Sprintf(format, args...), Carrier: n}
+	}
+	failed := func(f *fail) (Summary, error) {
+		if err := flush(); err != nil {
+			return s, err
+		}
+		if f.err != nil {
+			return s, fmt.Errorf("carrier %d: %w", n, f.err)
+		}
+		return s, &Refusal{Code: f.code, Reason: f.reason, Carrier: n}
+	}
+	if err := wire.ReadPreamble(r); err != nil {
+		return refuse(verify.RefusedDecode, "%v", err)
+	}
 
 	// The frames are read in order by one goroutine, which hands each to a
 	// worker and queues its answer, so the answers come out in the order
@@ -186,36 +284,61 @@ func Receive(ctx context.Context, r io.Reader, w io.Writer, o Options) (Summary,
 		}
 	}()
 
-	spent := map[string]bool{}
-	last := false
-	for it := range queue {
+	for {
+		var it item
+		var ok bool
+		select {
+		case it, ok = <-queue:
+		default:
+			if err := flush(); err != nil {
+				return s, err
+			}
+			it, ok = <-queue
+		}
+		if !ok {
+			break
+		}
 		if last {
 			// Anything after the signed last carrier is not part of the
 			// stream: only its clean end may follow.
 			if it.readErr == io.EOF {
-				return s, nil
+				return s, flush()
 			}
 			if it.readErr != nil && !errors.Is(it.readErr, io.ErrUnexpectedEOF) && !errors.Is(it.readErr, wire.ErrFrame) {
+				if err := flush(); err != nil {
+					return s, err
+				}
 				return s, fmt.Errorf("reading the end of the stream: %w", it.readErr)
 			}
 			return refuse(verify.RefusedSeq, "bytes follow the signed last carrier: something was appended to the stream")
 		}
 		switch err := it.readErr; {
 		case err == io.EOF:
-			return refuse(RefusedTruncated, "the stream ended after %d carrier(s) with no signed last carrier: it was cut short", s.Carriers)
+			return refuse(RefusedTruncated, "the stream ended after %d carrier(s) with no signed last carrier: it was cut short", n)
 		case errors.Is(err, io.ErrUnexpectedEOF):
 			return refuse(RefusedTruncated, "the stream ended inside a frame: it was cut short")
 		case errors.Is(err, wire.ErrFrame):
 			return refuse(verify.RefusedDecode, "%v", err)
 		case err != nil:
-			return s, fmt.Errorf("reading carrier %d: %w", s.Carriers, err)
+			if ferr := flush(); ferr != nil {
+				return s, ferr
+			}
+			return s, fmt.Errorf("reading carrier %d: %w", n, err)
 		}
-		c := <-it.checked
+		var c *checked
+		select {
+		case c = <-it.checked:
+		default:
+			if err := flush(); err != nil {
+				return s, err
+			}
+			c = <-it.checked
+		}
 		if c.own != nil {
 			return failed(c.own)
 		}
 		h := c.header
-		first := s.Carriers == 0
+		first := n == 0
 		if first {
 			s.Stream = h.Stream
 		}
@@ -225,8 +348,8 @@ func Receive(ctx context.Context, r io.Reader, w io.Writer, o Options) (Summary,
 			return refuse(verify.RefusedKey, "signed by %x, but the stream began under %x", h.Identity, s.Identity)
 		case h.Stream != s.Stream:
 			return refuse(verify.RefusedSeq, "belongs to stream %x, not %x: carriers of another stream were spliced in", h.Stream, s.Stream)
-		case h.Seq != uint64(s.Carriers): //nolint:gosec // a count
-			return refuse(verify.RefusedSeq, "sequence %d where %d was due: carriers are missing, repeated or out of order", h.Seq, s.Carriers)
+		case h.Seq != uint64(n): //nolint:gosec // a count
+			return refuse(verify.RefusedSeq, "sequence %d where %d was due: carriers are missing, repeated or out of order", h.Seq, n)
 		}
 		if c.funding != nil {
 			return failed(c.funding)
@@ -237,8 +360,42 @@ func Receive(ctx context.Context, r io.Reader, w io.Writer, o Options) (Summary,
 		if c.proof != nil {
 			return failed(c.proof)
 		}
+		// The height is believed only now: the proof placed the funding
+		// transaction in a block the header source holds at that height.
+		age := uint32(0)
+		if o.MaxAge > 0 || o.MinConf > 1 {
+			if !haveTip {
+				t, err := o.Headers.CurrentHeight(ctx)
+				if err != nil {
+					if ferr := flush(); ferr != nil {
+						return s, ferr
+					}
+					return s, fmt.Errorf("carrier %d: could not ask the header source for its tip, to tell how old the postage is: %w", n, err)
+				}
+				tip, haveTip = t, true
+			}
+			// A block the source proved and does not yet count in its tip
+			// is taken as the tip.
+			if tip > c.height {
+				age = tip - c.height
+			}
+			if conf := uint64(age) + 1; conf < uint64(o.MinConf) {
+				return refuse(RefusedStale, "funding transaction %s was mined at height %d and has %d confirmation(s) at tip %d, fewer than the %d you require: its postage is not deep enough yet", c.tree, c.height, conf, tip, o.MinConf)
+			}
+			if o.MaxAge > 0 && age > o.MaxAge {
+				return refuse(RefusedStale, "funding transaction %s was mined at height %d, %d block(s) below tip %d, and you take postage no older than %d: its postage is too old", c.tree, c.height, age, tip, o.MaxAge)
+			}
+		}
 		if c.retracted != nil {
 			return failed(c.retracted)
+		}
+		if o.Seen != nil {
+			if by, ok := o.Seen.Lookup(c.op); ok {
+				if by == c.txid {
+					return refuse(RefusedReplay, "this carrier was accepted before: funding output %s is in your record of outputs seen, under this same carrier", c.outpoint)
+				}
+				return refuse(verify.RefusedFork, "funding output %s is in your record of outputs seen under another carrier, %x: the sender signed two carriers on one output", c.outpoint, reversed(by))
+			}
 		}
 		// Trust is asked last, of a carrier that verified in full, so
 		// "untrusted" always means: genuine, and not from a sender you
@@ -249,20 +406,48 @@ func Receive(ctx context.Context, r io.Reader, w io.Writer, o Options) (Summary,
 		if first {
 			s.Identity, s.HaveIdentity, s.Pinned = h.Identity, true, len(o.Trusted) > 0
 		}
-		if _, err := w.Write(c.data); err != nil {
-			return s, fmt.Errorf("writing carrier %d: %w", s.Carriers, err)
+		// The output is recorded before the data is written, and stays
+		// recorded whatever becomes of the rest of the stream.
+		if o.Seen != nil {
+			if err := o.Seen.Add(c.op, c.txid, c.height); err != nil {
+				if ferr := flush(); ferr != nil {
+					return s, ferr
+				}
+				return s, fmt.Errorf("carrier %d: recording the funding output seen: %w", n, err)
+			}
 		}
 		spent[c.outpoint] = true
-		s.Carriers++
-		s.Bytes += int64(len(c.data))
+		n++
+		batch = append(batch, c.data)
 		s.Tree, s.Height = c.tree, c.height
 		s.Unspent = o.Spends != nil
+		s.Replay = o.Seen != nil
+		if haveTip {
+			s.AgeChecked, s.Tip, s.Age = true, tip, max(s.Age, age)
+		}
 		last = h.Last
+		if len(batch) >= batchMax {
+			if err := flush(); err != nil {
+				return s, err
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return s, err
 	}
 	if err := ctx.Err(); err != nil {
 		return s, err
 	}
 	return s, errors.New("the reader stopped without an answer")
+}
+
+// reversed is a transaction id in the order it is written.
+func reversed(id [32]byte) []byte {
+	out := make([]byte, 32)
+	for i, b := range id {
+		out[31-i] = b
+	}
+	return out
 }
 
 // fail is one check that did not pass: a refusal, or with err set, a check
@@ -289,8 +474,12 @@ type checked struct {
 	// funding is a failure of what the carrier spends, before SPV.
 	funding  *fail
 	outpoint string
-	tree     string
-	height   uint32
+	// op and txid are the funding output and this carrier's id, as a
+	// reader's record of outputs seen keeps them.
+	op     Outpoint
+	txid   [32]byte
+	tree   string
+	height uint32
 	// proof is SPV's failure, retracted the spend check's.
 	proof, retracted *fail
 }
@@ -367,6 +556,9 @@ func check(ctx context.Context, frame []byte, o Options, headers chaintracker.Ch
 	}
 	c.tree, c.height = tree.String(), src.MerklePath.BlockHeight
 	c.outpoint = fmt.Sprintf("%s.%d", c.tree, in.SourceTxOutIndex)
+	copy(c.op[:32], tree[:])
+	binary.BigEndian.PutUint32(c.op[32:], in.SourceTxOutIndex)
+	c.txid = *txid
 	switch k, err := verify.Check(ctx, tx, headers); k {
 	case verify.Passed:
 	case verify.ProofRefused, verify.AncestryMissing:

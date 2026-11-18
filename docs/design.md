@@ -43,18 +43,25 @@ Postage puts a mined cost behind every sender, and a receiver checks it
 from headers alone: a stream of n carriers needs n mined outputs of the
 sender's own. It is a setup cost, not a cost per message or per receiver.
 Carriers are never mined, so the chain does not record an output as
-used: one stream can go to many receivers for the postage of one, and a
-receiver that keeps no memory cannot see an output that backed an earlier
-stream. Noticing that takes an index of what was seen, which is a host's
-job and a seam here.
+used: one stream can go to many receivers for the postage of one.
+
+A receiver can ask for more. With `-seen` it keeps its own record of the
+outputs it accepted carriers on and takes each once. With `-max-age` it
+takes only postage mined within so many blocks, and then postage is
+perishable: a sender who keeps sending to that receiver mints a fresh
+tree every window, and the cost recurs with the window instead of being
+paid once. Neither reaches past the one receiver. A stream it took still
+verifies at another receiver, because nothing in a carrier names who it
+is for; an index shared between receivers is a host's job and a seam
+here.
 
 ## Shape
 
 | Question | Answer |
 | --- | --- |
-| Where is the state? | The sender's home: an identity key, a coin pool, and which funding outputs are spent. The receiver keeps none |
+| Where is the state? | The sender's home: an identity key, a coin pool, and which funding outputs are spent. The receiver keeps none, unless it asks for a record of outputs seen (`-seen`): one file, held by one receiver at a time |
 | What is the serialization point? | One funding output per carrier, per sender. Two senders share nothing |
-| What is stateless? | The receiver, and the transport |
+| What is stateless? | The transport, and a receiver without `-seen` |
 | What runs in parallel? | Any number of streams, senders and receivers |
 
 A funding output is marked spent in the sender's state before its carrier
@@ -90,6 +97,14 @@ verification each print a banner that `-q` does not silence, and each has
 its own exit status. A tool whose point is to say when data should not be
 believed must not be easy to ignore.
 
+**Age is the postage's block height, and replay is the receiver's own
+record.** A carrier carries no clock a receiver could trust, so the only
+age checked is the one the chain vouches for. A replay is caught by what
+the receiver wrote down itself, before it wrote the data, and the age
+limit is what lets that record forget. Both are off by default: a
+receiver with neither is the stateless one the rest of this page
+describes.
+
 **Sending asks nothing of the chain.** Postage is mined ahead and kept
 with its proof, so a send works wherever a TCP connection does, and its
 speed is the speed of hashing and signing.
@@ -111,5 +126,6 @@ Each of these is a seam, left open rather than closed off.
 | Resolving a name to the sender's key | `-k` taking a handle instead of a key |
 | Keeping a listener open for many streams | A drop box |
 | A receiver that watches for retraction after the fact | Today `-unspent` looks once, at verification time |
-| A receiver that remembers funding outputs across streams | Refusing postage used before |
+| A record of outputs seen that receivers share | Refusing a stream another receiver already took; today each `-seen` file is one receiver's |
+| A carrier that names who it is for | Refusing a stream sent to someone else, with no shared record |
 | A local header chain on the receiver | Headers checked for work and linked to their parents, from several sources: a forged proof would have to out-work the chain, not one header at a floor from one source |

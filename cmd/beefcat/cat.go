@@ -10,12 +10,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/lightwebinc/bcommon/termsafe"
 	"github.com/lightwebinc/bcommon/verify"
 
+	"github.com/lightwebinc/beefcat/internal/seen"
 	"github.com/lightwebinc/beefcat/recv"
 	"github.com/lightwebinc/beefcat/send"
 	"github.com/lightwebinc/beefcat/wire"
@@ -35,7 +37,12 @@ carrier verified against your own header source. Pin the sender with -k:
 without it, data from any sender whose carriers verify is written, and
 beefcat says so loudly. A stream that fails part way leaves the data of
 the carriers verified before it on standard output; with -save FILE,
-nothing is kept unless the whole stream verified.`
+nothing is kept unless the whole stream verified.
+
+A stream that verified once verifies again, so a receiver that must not
+take one twice keeps a record of the funding outputs it has accepted
+(-seen FILE) and refuses postage older than a limit (-max-age), which
+also keeps that record from growing forever.`
 
 // keyList is the -k flag: one or more sender keys.
 type keyList [][33]byte
@@ -53,23 +60,56 @@ func (k *keyList) Set(s string) error {
 	return nil
 }
 
+// blockSpan is a count of blocks: a number, or a duration taken at ten
+// minutes a block and rounded up.
+type blockSpan uint32
+
+const blockTime = 10 * time.Minute
+
+func (b *blockSpan) String() string { return strconv.FormatUint(uint64(*b), 10) }
+
+func (b *blockSpan) Set(s string) error {
+	if n, err := strconv.ParseUint(s, 10, 32); err == nil {
+		*b = blockSpan(n)
+		return nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 || d > time.Duration(1<<31)*time.Second {
+		return fmt.Errorf("%q is not a count of blocks, or a duration such as 24h", s)
+	}
+	*b = blockSpan((d + blockTime - 1) / blockTime)
+	return nil
+}
+
+const maxAgeUsage = "postage older than this is not used: a count of blocks below the header source's tip, or a duration such as 24h, taken at ten minutes a block; 0 is no limit"
+
 // recvFlags are the flags of a reader.
 type recvFlags struct {
 	keys    keyList
 	unspent bool
 	save    string
+	maxAge  blockSpan
+	minConf uint
+	seen    string
+}
+
+func (rf *recvFlags) any() bool {
+	return len(rf.keys) > 0 || rf.unspent || rf.save != "" || rf.minConf > 1 || rf.seen != ""
 }
 
 func addRecvFlags(fs *flag.FlagSet, rf *recvFlags) {
 	fs.Var(&rf.keys, "k", "receive: the sender's identity key (66 hex characters); repeat or separate with commas for several. Data from any other sender is refused")
 	fs.BoolVar(&rf.unspent, "unspent", false, "receive: also ask the chain view whether each funding output is spent by another transaction, and refuse data its sender retracted")
 	fs.StringVar(&rf.save, "save", "", "receive: write the data to FILE only if the whole stream verified, instead of standard output")
+	fs.UintVar(&rf.minConf, "min-conf", 1, "receive: refuse postage with fewer confirmations than this; the block that mined it is the first")
+	fs.StringVar(&rf.seen, "seen", "", "receive: keep a record in FILE of the funding outputs accepted, and refuse a carrier on one already there: a stream is taken once. Use it with -max-age, or FILE grows forever")
 }
 
 func cmdCat(ctx context.Context, g *global, args []string) (int, error) {
 	fs := g.flagSet("beefcat", catHelp)
 	var rf recvFlags
 	addRecvFlags(fs, &rf)
+	fs.Var(&rf.maxAge, "max-age", "receive: refuse a carrier whose postage is older than this; send: use only postage no older. "+maxAgeUsage)
 	listen := fs.String("l", "", "receive: listen on [ADDR:]PORT for one stream")
 	out := fs.String("o", "", "send: write the stream to FILE (- is standard output) instead of a connection")
 	chunk := fs.String("chunk", "4M", "send: data per carrier, at most 4M (bytes, or with K or M)")
@@ -85,8 +125,8 @@ func cmdCat(ctx context.Context, g *global, args []string) (int, error) {
 		}
 		return g.listen(ctx, *listen, rf, *wait)
 	}
-	if len(rf.keys) > 0 || rf.unspent || rf.save != "" {
-		return 0, usage("-k, -unspent and -save are for receiving (-l, or beefcat verify)")
+	if rf.any() {
+		return 0, usage("-k, -unspent, -save, -min-conf and -seen are for receiving (-l, or beefcat verify)")
 	}
 	size, err := parseSize(*chunk)
 	if err != nil || size > wire.MaxData {
@@ -94,30 +134,54 @@ func cmdCat(ctx context.Context, g *global, args []string) (int, error) {
 	}
 	switch {
 	case *out != "" && len(pos) == 0:
-		return g.sendTo(ctx, "", *out, size, *lines, *wait)
+		return g.sendTo(ctx, "", *out, size, *lines, *wait, uint32(rf.maxAge))
 	case *out == "" && len(pos) == 2:
-		return g.sendTo(ctx, net.JoinHostPort(pos[0], pos[1]), "", size, *lines, *wait)
+		return g.sendTo(ctx, net.JoinHostPort(pos[0], pos[1]), "", size, *lines, *wait, uint32(rf.maxAge))
 	}
 	return 0, usage("beefcat HOST PORT, beefcat -o FILE, or beefcat -l PORT (beefcat help)")
 }
 
-// sendTo sends standard input to addr, or to the file out.
-func (g *global) sendTo(ctx context.Context, addr, out string, chunk int, lines bool, wait time.Duration) (int, error) {
+// sendTo sends standard input to addr, or to the file out. With maxAge it
+// spends only postage mined no more than that many blocks below the tip.
+func (g *global) sendTo(ctx context.Context, addr, out string, chunk int, lines bool, wait time.Duration, maxAge uint32) (int, error) {
 	h, err := g.openHome()
 	if err != nil {
 		return 0, err
 	}
 	defer h.close()
+	// A send asks nothing of the chain, but for this: how old the home's
+	// postage is, is told against the header source's tip.
+	minHeight, old := uint32(0), ""
+	if maxAge > 0 {
+		hc, err := g.headerClient()
+		if err != nil {
+			return 0, err
+		}
+		tip, err := hc.CurrentHeight(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("-max-age: the header source %s did not give its tip: %w", g.cfg.Headers, err)
+		}
+		if tip > maxAge {
+			minHeight = tip - maxAge
+		}
+		old = fmt.Sprintf(" no more than %d block(s) old at tip %d", maxAge, tip)
+		if h.st.RemainingFrom(minHeight) == 0 && h.st.Remaining() > 0 {
+			return 0, fmt.Errorf("the home has postage for %d carrier(s), all of it more than %d block(s) below tip %d: nothing was sent. Mint fresh postage with `beefcat fund -max-age %d`", h.st.Remaining(), maxAge, tip, maxAge)
+		}
+	}
 	// A file's size is known, so a send that cannot finish is refused
 	// before a carrier is spent on it.
 	if f, ok := g.stdin.(*os.File); ok && !lines {
 		if st, err := f.Stat(); err == nil && st.Mode().IsRegular() {
-			if need, have := send.Need(st.Size(), chunk), h.st.Remaining(); need > have {
+			if need, have := send.Need(st.Size(), chunk), h.st.RemainingFrom(minHeight); need > have {
+				if maxAge > 0 {
+					return 0, fmt.Errorf("this input takes %d carrier(s) and the home has postage for %d%s: run `beefcat fund -n %d -max-age %d`", need, have, old, need, maxAge)
+				}
 				return 0, fmt.Errorf("this input takes %d carrier(s) and the home has postage for %d: run `beefcat fund -n %d`", need, have, need)
 			}
 		}
 	}
-	if h.st.NextTree() == nil {
+	if h.st.NextTreeFrom(minHeight) == nil {
 		return 0, send.ErrNoPostage
 	}
 	var w io.Writer
@@ -166,7 +230,7 @@ func (g *global) sendTo(ctx context.Context, addr, out string, chunk int, lines 
 		w = bw
 	}
 	sg := h.e.Signer()
-	s := &send.Sender{Wallet: sg, Originator: sg.Originator, State: h.st, Chunk: chunk, Lines: lines}
+	s := &send.Sender{Wallet: sg, Originator: sg.Originator, State: h.st, Chunk: chunk, Lines: lines, MinHeight: minHeight}
 	copy(s.Identity[:], sg.IdentityKey().Compressed())
 	start := time.Now()
 	st, err := s.Stream(sctx, g.stdin, w)
@@ -195,7 +259,7 @@ func (g *global) sendTo(ctx context.Context, addr, out string, chunk int, lines 
 	}
 	el := time.Since(start)
 	g.say("sent %d carrier(s), %d bytes of data (%d on the wire) in %s; stream %x; postage left for %d carrier(s)",
-		st.Carriers, st.Bytes, st.Wire, el.Round(time.Millisecond), st.Stream, h.st.Remaining())
+		st.Carriers, st.Bytes, st.Wire, el.Round(time.Millisecond), st.Stream, h.st.RemainingFrom(minHeight))
 	if conn == nil {
 		return exitOK, nil
 	}
@@ -258,10 +322,11 @@ func (g *global) listen(ctx context.Context, addr string, rf recvFlags, idle tim
 		addr = ":" + addr
 	}
 	// Everything that can be refused is refused before the port opens.
-	rd, err := g.reader(rf)
+	rd, err := g.reader(ctx, rf)
 	if err != nil {
 		return 0, err
 	}
+	defer rd.close()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", addr)
 	if err != nil {
@@ -320,6 +385,7 @@ func cmdVerify(ctx context.Context, g *global, args []string) (int, error) {
 	fs := g.flagSet("verify", verifyHelp)
 	var rf recvFlags
 	addRecvFlags(fs, &rf)
+	fs.Var(&rf.maxAge, "max-age", "refuse a carrier whose postage is older than this. "+maxAgeUsage)
 	pos, err := g.parse(fs, args)
 	if err != nil {
 		return 0, err
@@ -336,10 +402,11 @@ func cmdVerify(ctx context.Context, g *global, args []string) (int, error) {
 		defer f.Close()
 		in = f
 	}
-	rd, err := g.reader(rf)
+	rd, err := g.reader(ctx, rf)
 	if err != nil {
 		return 0, err
 	}
+	defer rd.close()
 	code, _ := rd.run(ctx, in)
 	return code, nil
 }
@@ -350,9 +417,28 @@ type reader struct {
 	g    *global
 	opts recv.Options
 	save string
+	seen *seen.Log
 }
 
-func (g *global) reader(rf recvFlags) (*reader, error) {
+// seenLog is a seen-output file as a reader's record.
+type seenLog struct{ l *seen.Log }
+
+func (s seenLog) Lookup(o recv.Outpoint) ([32]byte, bool) { return s.l.Lookup(o) }
+func (s seenLog) Add(o recv.Outpoint, carrier [32]byte, height uint32) error {
+	return s.l.Add(o, carrier, height)
+}
+func (s seenLog) Sync() error { return s.l.Sync() }
+
+// close releases the reader's record of outputs seen.
+func (rd *reader) close() {
+	if rd.seen != nil {
+		if err := rd.seen.Close(); err != nil {
+			fmt.Fprintf(rd.g.stderr, "beefcat: closing the seen-output file: %v\n", err)
+		}
+	}
+}
+
+func (g *global) reader(ctx context.Context, rf recvFlags) (*reader, error) {
 	hc, err := g.headerClient()
 	if err != nil {
 		return nil, err
@@ -364,13 +450,38 @@ func (g *global) reader(rf recvFlags) (*reader, error) {
 			return nil, usage("-save %s: the file exists; -save does not overwrite", rf.save)
 		}
 	}
-	rd := &reader{g: g, opts: recv.Options{Headers: hc, Trusted: rf.keys}, save: rf.save}
+	if rf.minConf > 1<<31 {
+		return nil, usage("-min-conf %d: too many", rf.minConf)
+	}
+	rd := &reader{g: g, opts: recv.Options{Headers: hc, Trusted: rf.keys, MaxAge: uint32(rf.maxAge), MinConf: uint32(rf.minConf)}, save: rf.save} //nolint:gosec // bounded above
 	if rf.unspent {
 		chain, err := g.chain(hc)
 		if err != nil {
 			return nil, err
 		}
 		rd.opts.Spends = chain
+	}
+	if rf.seen != "" {
+		l, err := seen.Open(rf.seen)
+		if err != nil {
+			return nil, fmt.Errorf("-seen %s: %w", rf.seen, err)
+		}
+		rd.seen, rd.opts.Seen = l, seenLog{l}
+		// An output older than the limit is refused for its age, so its
+		// record is no longer needed. A tip that cannot be had leaves the
+		// file as it is: the stream is then held to it when it arrives.
+		if rf.maxAge > 0 {
+			if tip, err := hc.CurrentHeight(ctx); err == nil && tip > uint32(rf.maxAge) {
+				if n, err := l.Prune(tip - uint32(rf.maxAge)); err != nil {
+					rd.close()
+					return nil, fmt.Errorf("-seen %s: %w", rf.seen, err)
+				} else if n > 0 {
+					g.say("forgot %d funding output(s) older than -max-age; %d kept in %s", n, l.Len(), rf.seen)
+				}
+			}
+		} else {
+			g.say("-seen without -max-age: %s holds %d funding output(s) and grows by one for every carrier accepted, forever", rf.seen, l.Len())
+		}
 	}
 	return rd, nil
 }
@@ -457,8 +568,29 @@ func (rd *reader) run(ctx context.Context, in io.Reader) (int, string) {
 		if s.Unspent {
 			retract = "every funding output unspent"
 		}
-		fmt.Fprintf(g.stderr, "beefcat: %s %d carrier(s), %d bytes in %s\n  sender      %s (%s)\n  stream      %x\n  postage     funding transaction %s, mined at height %d\n  headers     %s\n  retraction  %s\n",
-			verify.Verified, s.Carriers, s.Bytes, el.Round(time.Millisecond), who, pin, s.Stream, s.Tree, s.Height, g.cfg.Headers, retract)
+		age := "not checked (-max-age, -min-conf)"
+		if s.AgeChecked {
+			age = fmt.Sprintf("at most %d block(s) below tip %d", s.Age, s.Tip)
+			if rd.opts.MaxAge > 0 {
+				age += fmt.Sprintf(", limit %d", rd.opts.MaxAge)
+			}
+			if rd.opts.MinConf > 1 {
+				age += fmt.Sprintf(", at least %d confirmation(s)", rd.opts.MinConf)
+			}
+		}
+		replay := "not checked (-seen): this stream verifies again if it is sent again"
+		if s.Replay {
+			replay = "every funding output new to your record, and now in it"
+		}
+		fmt.Fprintf(g.stderr, "beefcat: %s %d carrier(s), %d bytes in %s\n  sender      %s (%s)\n  stream      %x\n  postage     funding transaction %s, mined at height %d\n  headers     %s\n  retraction  %s\n  age         %s\n  replay      %s\n",
+			verify.Verified, s.Carriers, s.Bytes, el.Round(time.Millisecond), who, pin, s.Stream, s.Tree, s.Height, g.cfg.Headers, retract, age, replay)
 	}
-	return exitOK, fmt.Sprintf("%s carriers=%d bytes=%d", verify.Verified, s.Carriers, s.Bytes)
+	age, replay := "not-checked", "not-checked"
+	if s.AgeChecked {
+		age = strconv.FormatUint(uint64(s.Age), 10)
+	}
+	if s.Replay {
+		replay = "checked"
+	}
+	return exitOK, fmt.Sprintf("%s carriers=%d bytes=%d age=%s replay=%s", verify.Verified, s.Carriers, s.Bytes, age, replay)
 }

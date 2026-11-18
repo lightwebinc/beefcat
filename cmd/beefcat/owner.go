@@ -163,10 +163,12 @@ func (g *global) printIdentity(e *bwallet.Embedded) error {
 const statusHelp = `usage: beefcat status
 
 Print the home: its identity key (what a receiver pins with -k), fund
-address, coin pool and the postage left. Reads only.`
+address, coin pool and the postage left. Reads only. With -age it asks
+the header source for its tip and prints how old each tree's postage is.`
 
-func cmdStatus(_ context.Context, g *global, args []string) error {
+func cmdStatus(ctx context.Context, g *global, args []string) error {
 	fs := g.flagSet("status", statusHelp)
+	age := fs.Bool("age", false, "ask the header source for its tip, and print each tree's age in blocks")
 	if pos, err := g.parse(fs, args); err != nil {
 		return err
 	} else if len(pos) > 0 {
@@ -180,6 +182,17 @@ func cmdStatus(_ context.Context, g *global, args []string) error {
 	if err != nil {
 		return err
 	}
+	tip, haveTip := uint32(0), false
+	if *age {
+		hc, err := g.headerClient()
+		if err != nil {
+			return err
+		}
+		if tip, err = hc.CurrentHeight(ctx); err != nil {
+			return fmt.Errorf("-age: the header source %s did not give its tip: %w", g.cfg.Headers, err)
+		}
+		haveTip = true
+	}
 	out := g.stdout
 	fmt.Fprintf(out, "home         %s\nnetwork      %s\n", g.home, g.cfg.Network)
 	if err := g.printIdentity(e); err != nil {
@@ -190,6 +203,13 @@ func cmdStatus(_ context.Context, g *global, args []string) error {
 	fmt.Fprintf(out, "postage      %d carrier(s) left (up to %d bytes of data)\n", st.Remaining(), st.Remaining()*wire.MaxData)
 	for _, t := range st.Trees {
 		state := fmt.Sprintf("mined at height %d", t.Height)
+		if haveTip && t.BumpHex != "" {
+			old := uint32(0)
+			if tip > t.Height {
+				old = tip - t.Height
+			}
+			state += fmt.Sprintf(", %d block(s) old at tip %d", old, tip)
+		}
 		if t.BumpHex == "" {
 			state = "not mined yet"
 		}
@@ -395,6 +415,8 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 	beef := fs.String("beef", "", "import this payment's BEEF first: a file, or - for standard input")
 	coinbase := fs.Bool("coinbase", false, "coinbase: only on a regtest chain you run (development and tests); mine 101 blocks to the fund address first")
 	wait := fs.Duration("wait", 30*time.Minute, "how long to wait for the block that mines the tree")
+	var maxAge blockSpan
+	fs.Var(&maxAge, "max-age", "count only postage no older than this toward N, and mint what is missing. "+maxAgeUsage)
 	pos, err := g.parse(fs, args)
 	if err != nil {
 		return err
@@ -461,8 +483,20 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 		}
 		g.say("mined coinbase: %d output(s) added; pool %d output(s), %d sat", added, h.e.Pool.Count(), h.e.Pool.Balance())
 	}
-	for h.st.Remaining() < uint64(*n) { //nolint:gosec // checked non-negative
-		count := int(uint64(*n) - h.st.Remaining()) //nolint:gosec // checked non-negative
+	// With -max-age, postage too old for a far end that limits its age
+	// does not count: what is missing is minted fresh, and the old stays.
+	minHeight := uint32(0)
+	if maxAge > 0 {
+		tip, err := e.hc.CurrentHeight(ctx)
+		if err != nil {
+			return fmt.Errorf("-max-age: the header source %s did not give its tip: %w", g.cfg.Headers, err)
+		}
+		if tip > uint32(maxAge) {
+			minHeight = tip - uint32(maxAge)
+		}
+	}
+	for h.st.RemainingFrom(minHeight) < uint64(*n) { //nolint:gosec // checked non-negative
+		count := int(uint64(*n) - h.st.RemainingFrom(minHeight)) //nolint:gosec // checked non-negative
 		if count > mint.MaxFundingOutputs {
 			count = mint.MaxFundingOutputs
 		}
@@ -485,6 +519,11 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 		if len(h.st.Trees) == before || h.st.Trees[len(h.st.Trees)-1].BumpHex == "" {
 			return errors.New("the funding tree was broadcast and is not recorded as mined; run `beefcat fund` again")
 		}
+	}
+	if maxAge > 0 {
+		fmt.Fprintf(g.stdout, "postage for %d carrier(s) no more than %d block(s) old, %d in all; pool %d output(s), %d sat\n",
+			h.st.RemainingFrom(minHeight), maxAge, h.st.Remaining(), h.e.Pool.Count(), h.e.Pool.Balance())
+		return nil
 	}
 	fmt.Fprintf(g.stdout, "postage for %d carrier(s), up to %d bytes of data; pool %d output(s), %d sat\n",
 		h.st.Remaining(), h.st.Remaining()*wire.MaxData, h.e.Pool.Count(), h.e.Pool.Balance())

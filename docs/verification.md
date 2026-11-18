@@ -37,8 +37,10 @@ stopping at the first that fails:
 | 9 | It spends a beefcat funding output of the sender's own, in a transaction that carries its own Merkle path, and that path leads from that transaction | `REFUSED-DECODE`, `REFUSED-BUMP` |
 | 10 | No earlier carrier of the stream spent that output | `REFUSED-FORK` |
 | 11 | SPV: the input's signature satisfies the funding output, and the Merkle path leads to a root your header source holds at that height | `REFUSED-SIG`, `REFUSED-BUMP` |
-| 12 | With `-unspent`: the chain view shows the funding output unspent, or spent by this carrier | `REFUSED-RETRACTED` |
-| 13 | The sender is one you pinned with `-k`, if you pinned any | `REFUSED-UNTRUSTED` |
+| 12 | With `-max-age` or `-min-conf`: the funding transaction lies no more blocks below your header source's tip than you allow, and has the confirmations you require | `REFUSED-STALE` |
+| 13 | With `-unspent`: the chain view shows the funding output unspent, or spent by this carrier | `REFUSED-RETRACTED` |
+| 14 | With `-seen`: the funding output is not in your record of outputs you accepted carriers on | `REFUSED-REPLAY`, `REFUSED-FORK` |
+| 15 | The sender is one you pinned with `-k`, if you pinned any | `REFUSED-UNTRUSTED` |
 
 Only then is the carrier's data written. After the carrier that signs
 itself as the last:
@@ -108,6 +110,49 @@ did not verify to its end, receive with `-save FILE`: the file appears
 only when the whole stream verified. `-save` does not overwrite: a file
 left by an earlier run is refused before anything is read.
 
+## Age and replay
+
+A carrier is never mined, so nothing on the chain says an output was
+used, and a stream that verified once verifies again. Two checks, both
+off unless asked for, close that for one receiver.
+
+**Age** (`-max-age N`, `-min-conf N`). A carrier has no time of its own.
+The one time the chain vouches for is the height of the block that mined
+its postage, and it is believed only after check 11 placed the funding
+transaction in that block. Age is the tip's height less that height, in
+blocks. `-max-age 144` refuses postage more than 144 blocks old;
+`-max-age 24h` is the same, taken at ten minutes a block. `-min-conf 6`
+refuses postage with fewer than six confirmations, counting the block
+that mined it as the first, for a receiver that will not rest on a block
+a reorganization could still replace. The tip is asked of your header
+source once per stream. If it does not answer there is no verdict, exit
+1. A proof at a height above the tip the source reports counts as the
+tip.
+
+**Replay** (`-seen FILE`). The receiver records each funding output as
+it accepts a carrier on it, in FILE, and makes the record durable before
+it writes that carrier's data. A carrier on an output already there is
+refused: `REFUSED-REPLAY` when it is the carrier recorded, and
+`REFUSED-FORK` when it is another, which means the sender signed two
+carriers on one output. A crash between the record and the write can
+lose data and cannot let a stream in twice. The outputs of a stream
+refused part way stay recorded: its sender marked them spent before
+signing, and sends again on fresh ones.
+
+The two work together. Alone, the record grows by 72 bytes for every
+carrier, forever. With `-max-age`, an output older than the limit is
+refused for its age, so its record is dropped when the file is next
+opened. Keep one `-max-age` for one file: records dropped under a short
+limit are not there for a later run with a longer one.
+
+What they do not do:
+
+| Limit | Why |
+| --- | --- |
+| Age is the postage's, not the data's | A sender can sign today on postage mined an hour ago, and inside the limit an old stream is as young as a new one. Only the record refuses it |
+| The record is this receiver's | A stream one receiver took still verifies at another whose record is empty. Nothing in a carrier names who it is for |
+| The tip comes from your header source | A source that understates its tip makes old postage look young. It is the same single source the proofs rest on: see below |
+
 ## Pinning the sender
 
 Verification proves that some key signed the data and paid for it. It
@@ -124,7 +169,9 @@ print. Get it from the sender over a channel you already trust.
 
 1. **When the data was made.** The postage has a block height. The data
    was signed at some time after the postage was created; nothing says
-   when.
+   when. `-max-age` bounds how old the postage may be, which bounds how
+   long ago the data can have been signed, and says nothing closer than
+   that.
 2. **That the data is still current.** SPV proves a transaction was
    mined. It cannot prove an output is still unspent. A sender retracts
    by spending the funding outputs (`beefcat sweep`), and only a view of
@@ -135,15 +182,19 @@ print. Get it from the sender over a channel you already trust.
 4. **That this is the stream just sent.** A verified stream proves the
    sender signed it at some time. Someone on the path cannot change a
    stream, but can hand you an older complete stream from the same
-   sender in its place, and it verifies. If freshness matters, put it in
-   the data: a date, a counter, a challenge you chose.
+   sender in its place, and it verifies. `-seen FILE` refuses a stream
+   this receiver took before, and `-max-age` one on postage older than
+   you allow. A stream you never took, on postage still young enough,
+   passes both. If freshness matters beyond that, put it in the data: a
+   date, a counter, a challenge you chose.
 5. **What this message cost.** Postage is a setup cost. Within a stream,
    one funding output backs one carrier, and a second use is refused, so
    a stream needs as many mined outputs of the sender's as it has
    carriers. But a carrier is never mined, so the chain does not record
    an output as used: the same stream can be sent to many receivers, and
-   a receiver, which keeps no memory between streams, cannot see an
-   output that backed an earlier one. The proof says the sender's key
+   a receiver sees an output that backed an earlier stream only if it
+   kept a record of its own (`-seen`), and only of streams it took
+   itself. The proof says the sender's key
    paid to exist on the chain, not that it paid for this delivery.
 6. **Anything about secrecy.** The data is signed, not encrypted. Anyone
    on the path can read it.
@@ -179,6 +230,12 @@ with the most-work chain taken. beefcat does not have one yet. Until it
 does, point `-headers` at a header service you run (`bhs:URL`,
 `chaintracks:URL`), which keeps such a chain itself, and reach it over a
 path you trust.
+
+The tip that `-max-age` and `-min-conf` measure against comes from the
+same one source and is taken at its word, so a source that understates
+its tip passes postage older than your limit, and one that overstates it
+refuses postage that is young enough. A local header chain closes that
+too.
 
 A header source that fails, rather than answering no, gives no verdict.
 A proof naming a block the source will not answer for at all can

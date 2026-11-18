@@ -140,20 +140,28 @@ func (s *State) Save() error {
 }
 
 // Remaining is how many carriers the mined trees can still fund.
-func (s *State) Remaining() uint64 {
+func (s *State) Remaining() uint64 { return s.RemainingFrom(0) }
+
+// RemainingFrom is how many carriers the trees mined at height or above
+// can still fund.
+func (s *State) RemainingFrom(height uint32) uint64 {
 	var n uint64
 	for i := range s.Trees {
-		if s.Trees[i].BumpHex != "" {
-			n += uint64(s.Trees[i].Remaining())
+		if t := &s.Trees[i]; t.BumpHex != "" && t.Height >= height {
+			n += uint64(t.Remaining())
 		}
 	}
 	return n
 }
 
 // NextTree is the first mined tree with an output left, or nil.
-func (s *State) NextTree() *funding.Tree {
+func (s *State) NextTree() *funding.Tree { return s.NextTreeFrom(0) }
+
+// NextTreeFrom is the first tree mined at height or above with an output
+// left, or nil.
+func (s *State) NextTreeFrom(height uint32) *funding.Tree {
 	for i := range s.Trees {
-		if t := &s.Trees[i]; t.BumpHex != "" && t.Remaining() > 0 {
+		if t := &s.Trees[i]; t.BumpHex != "" && t.Height >= height && t.Remaining() > 0 {
 			return t
 		}
 	}
