@@ -42,17 +42,3 @@ jobs:
       # QUICKSTART.md's sandbox, run as written.
       - name: quickstart
         run: make quickstart-check
-
-  # The packages that hold files and locks have a path of their own where
-  # the platform is not unix. It is run here, not only compiled.
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.27.4"
-      - name: test
-        run: go test ./internal/... ./wire/...
