@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/lightwebinc/bcommon/headers"
 	"github.com/lightwebinc/bcommon/termsafe"
 	"github.com/lightwebinc/bcommon/verify"
 
@@ -29,7 +31,7 @@ const catHelp = `usage: beefcat [flags] HOST PORT        send standard input to 
 
 Sending cuts standard input into chunks and signs each into one carrier,
 spending one funding output of the home's (beefcat fund). It asks nothing
-of the chain. Over TCP it then waits for the far end's verdict and exits
+of the chain, unless -max-age has it ask the header source for its tip. Over TCP it then waits for the far end's verdict and exits
 with it.
 
 Receiving writes a carrier's data to standard output only after that
@@ -427,7 +429,31 @@ func (s seenLog) Lookup(o recv.Outpoint) ([32]byte, bool) { return s.l.Lookup(o)
 func (s seenLog) Add(o recv.Outpoint, carrier [32]byte, height uint32) error {
 	return s.l.Add(o, carrier, height)
 }
-func (s seenLog) Sync() error { return s.l.Sync() }
+func (s seenLog) Sync() error   { return s.l.Sync() }
+func (s seenLog) Floor() uint32 { return s.l.Floor() }
+
+// oneTip is a header source whose tip is asked once and then held, so the
+// record of outputs seen is pruned against the same tip the stream's age
+// is measured against.
+type oneTip struct {
+	*headers.Client
+	mu   sync.Mutex
+	tip  uint32
+	have bool
+}
+
+func (o *oneTip) CurrentHeight(ctx context.Context) (uint32, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.have {
+		tip, err := o.Client.CurrentHeight(ctx)
+		if err != nil {
+			return 0, err
+		}
+		o.tip, o.have = tip, true
+	}
+	return o.tip, nil
+}
 
 // close releases the reader's record of outputs seen.
 func (rd *reader) close() {
@@ -453,7 +479,8 @@ func (g *global) reader(ctx context.Context, rf recvFlags) (*reader, error) {
 	if rf.minConf > 1<<31 {
 		return nil, usage("-min-conf %d: too many", rf.minConf)
 	}
-	rd := &reader{g: g, opts: recv.Options{Headers: hc, Trusted: rf.keys, MaxAge: uint32(rf.maxAge), MinConf: uint32(rf.minConf)}, save: rf.save} //nolint:gosec // bounded above
+	tips := &oneTip{Client: hc}
+	rd := &reader{g: g, opts: recv.Options{Headers: tips, Trusted: rf.keys, MaxAge: uint32(rf.maxAge), MinConf: uint32(rf.minConf)}, save: rf.save} //nolint:gosec // bounded above
 	if rf.unspent {
 		chain, err := g.chain(hc)
 		if err != nil {
@@ -471,7 +498,7 @@ func (g *global) reader(ctx context.Context, rf recvFlags) (*reader, error) {
 		// record is no longer needed. A tip that cannot be had leaves the
 		// file as it is: the stream is then held to it when it arrives.
 		if rf.maxAge > 0 {
-			if tip, err := hc.CurrentHeight(ctx); err == nil && tip > uint32(rf.maxAge) {
+			if tip, err := tips.CurrentHeight(ctx); err == nil && tip > uint32(rf.maxAge) {
 				if n, err := l.Prune(tip - uint32(rf.maxAge)); err != nil {
 					rd.close()
 					return nil, fmt.Errorf("-seen %s: %w", rf.seen, err)

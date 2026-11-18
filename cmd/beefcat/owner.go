@@ -485,17 +485,32 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 	}
 	// With -max-age, postage too old for a far end that limits its age
 	// does not count: what is missing is minted fresh, and the old stays.
-	minHeight := uint32(0)
-	if maxAge > 0 {
+	// The cutoff is taken again after every tree, since each costs a block.
+	minHeight, ageFlag := uint32(0), ""
+	cutoff := func() error {
+		if maxAge == 0 {
+			return nil
+		}
 		tip, err := e.hc.CurrentHeight(ctx)
 		if err != nil {
 			return fmt.Errorf("-max-age: the header source %s did not give its tip: %w", g.cfg.Headers, err)
 		}
+		minHeight = 0
 		if tip > uint32(maxAge) {
 			minHeight = tip - uint32(maxAge)
 		}
+		return nil
 	}
-	for h.st.RemainingFrom(minHeight) < uint64(*n) { //nolint:gosec // checked non-negative
+	if maxAge > 0 {
+		ageFlag = fmt.Sprintf(" -max-age %d", maxAge)
+	}
+	for {
+		if err := cutoff(); err != nil {
+			return err
+		}
+		if h.st.RemainingFrom(minHeight) >= uint64(*n) { //nolint:gosec // checked non-negative
+			break
+		}
 		count := int(uint64(*n) - h.st.RemainingFrom(minHeight)) //nolint:gosec // checked non-negative
 		if count > mint.MaxFundingOutputs {
 			count = mint.MaxFundingOutputs
@@ -507,17 +522,17 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 			if errors.As(err, &nc) {
 				addr, _ := h.e.FundAddress(h.e.Mainnet)
 				if nc.Held > 0 {
-					return fmt.Errorf("the pool's coin is change from %d transaction(s) not mined yet: run `beefcat fund` again after the next block", nc.Held)
+					return fmt.Errorf("the pool's coin is change from %d transaction(s) not mined yet: run `beefcat fund%s` again after the next block", nc.Held, ageFlag)
 				}
-				return fmt.Errorf("the pool cannot pay for a tree of %d output(s), about %d sat: send a payment to the fund address %s from your own wallet, then `beefcat fund -n %d -txid <its txid>`", count, treeCost(count), addr, *n)
+				return fmt.Errorf("the pool cannot pay for a tree of %d output(s), about %d sat: send a payment to the fund address %s from your own wallet, then `beefcat fund -n %d%s -txid <its txid>`", count, treeCost(count), addr, *n, ageFlag)
 			}
 			if len(h.st.Pending) > 0 {
-				return fmt.Errorf("%w\nthe tree may still be mined: run `beefcat fund -n %d` again later, which asks what became of it and mints nothing twice", err, *n)
+				return fmt.Errorf("%w\nthe tree may still be mined: run `beefcat fund -n %d%s` again later, which asks what became of it and mints nothing twice", err, *n, ageFlag)
 			}
 			return err
 		}
 		if len(h.st.Trees) == before || h.st.Trees[len(h.st.Trees)-1].BumpHex == "" {
-			return errors.New("the funding tree was broadcast and is not recorded as mined; run `beefcat fund` again")
+			return fmt.Errorf("the funding tree was broadcast and is not recorded as mined; run `beefcat fund%s` again", ageFlag)
 		}
 	}
 	if maxAge > 0 {

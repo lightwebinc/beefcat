@@ -119,18 +119,22 @@ func TestPrune(t *testing.T) {
 	if _, ok := l.Lookup(op(4, 0)); ok {
 		t.Fatal("a pruned record reads as seen")
 	}
-	// The log still takes records after it was replaced.
+	if l.Floor() != 705 {
+		t.Fatalf("floor %d, want 705", l.Floor())
+	}
+	// The log still takes records after it was replaced, and a prune to a
+	// lower height, as after a tip that fell, changes nothing.
 	_ = l.Add(op(20, 0), [32]byte{20}, 720)
-	if n, err := l.Prune(0); err != nil || n != 0 {
-		t.Fatalf("a prune of nothing: %d %v", n, err)
+	if n, err := l.Prune(700); err != nil || n != 0 || l.Floor() != 705 {
+		t.Fatalf("a prune below the floor: %d %v, floor %d", n, err, l.Floor())
 	}
 	if err := l.Close(); err != nil {
 		t.Fatal(err)
 	}
 	l = mustOpen(t, path)
 	defer l.Close()
-	if l.Len() != 6 {
-		t.Fatalf("%d record(s) after reopening, want 6", l.Len())
+	if l.Len() != 6 || l.Floor() != 705 {
+		t.Fatalf("%d record(s) after reopening, want 6; floor %d, want 705", l.Len(), l.Floor())
 	}
 	for _, i := range []byte{5, 9, 20} {
 		if _, ok := l.Lookup(op(i, 0)); !ok {

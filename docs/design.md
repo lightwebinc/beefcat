@@ -107,7 +107,10 @@ describes.
 
 **Sending asks nothing of the chain.** Postage is mined ahead and kept
 with its proof, so a send works wherever a TCP connection does, and its
-speed is the speed of hashing and signing.
+speed is the speed of hashing and signing. The one exception is a send
+told the far end's age limit (`-max-age`): it asks the header source for
+its tip, once, to tell which postage is young enough, and does not run
+without that answer.
 
 **The sender is pinned by key, not by name.** Resolving a name to a key
 is a different problem with its own answers

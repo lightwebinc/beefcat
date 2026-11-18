@@ -76,8 +76,9 @@ is not there, holds 72 bytes per carrier accepted, and is used by one
 receiver at a time (`FILE.lock` beside it). Each output is recorded
 before its carrier's data is written. Without `-max-age` the file grows
 forever, and beefcat says so on every run. With it, outputs older than
-the limit are dropped each time the file is opened, so use the same
-limit on every run with one file. A receiver that restarts for each
+the limit are dropped each time the file is opened, and postage mined
+below the height the file was cleared to is refused from then on, even
+by a run with a longer limit. A receiver that restarts for each
 stream, as `-l` does, shares one FILE across its runs; another receiver
 with another file knows nothing of it.
 

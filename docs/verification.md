@@ -142,14 +142,18 @@ signing, and sends again on fresh ones.
 The two work together. Alone, the record grows by 72 bytes for every
 carrier, forever. With `-max-age`, an output older than the limit is
 refused for its age, so its record is dropped when the file is next
-opened. Keep one `-max-age` for one file: records dropped under a short
-limit are not there for a later run with a longer one.
+opened. The height it was cleared to is kept in the file as a floor that
+never falls, and postage mined below the floor is refused as
+`REFUSED-STALE` whatever limit a later run gives and whatever tip the
+header source reports then: what the record forgot, it does not take
+again. The tip is asked once per run, so the record is cleared against
+the same tip the stream is measured against.
 
 What they do not do:
 
 | Limit | Why |
 | --- | --- |
-| Age is the postage's, not the data's | A sender can sign today on postage mined an hour ago, and inside the limit an old stream is as young as a new one. Only the record refuses it |
+| Age is the postage's, not the data's | A sender can sign on postage at any time, before it is mined or long after, and inside the limit an old stream is as young as a new one. Only the record refuses it |
 | The record is this receiver's | A stream one receiver took still verifies at another whose record is empty. Nothing in a carrier names who it is for |
 | The tip comes from your header source | A source that understates its tip makes old postage look young. It is the same single source the proofs rest on: see below |
 
@@ -169,9 +173,9 @@ print. Get it from the sender over a channel you already trust.
 
 1. **When the data was made.** The postage has a block height. The data
    was signed at some time after the postage was created; nothing says
-   when. `-max-age` bounds how old the postage may be, which bounds how
-   long ago the data can have been signed, and says nothing closer than
-   that.
+   when, and it can be earlier still: a carrier can be signed on
+   postage before that postage is mined. `-max-age` bounds how long ago
+   the postage was mined, not when the data was signed.
 2. **That the data is still current.** SPV proves a transaction was
    mined. It cannot prove an output is still unspent. A sender retracts
    by spending the funding outputs (`beefcat sweep`), and only a view of

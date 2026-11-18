@@ -10,8 +10,10 @@
 // replay.
 //
 // The file grows by one record per carrier. Prune drops the records of
-// outputs mined below a height: a receiver that also refuses postage older
-// than a limit needs no memory of outputs older than that.
+// outputs mined below a height, and keeps that height as a floor: a
+// receiver that also refuses postage older than a limit needs no memory of
+// outputs older than that, so long as it takes nothing from below the
+// floor again.
 package seen
 
 import (
@@ -32,6 +34,9 @@ import (
 //	32      4     funding output index, big-endian
 //	36      32    id of the carrier accepted on that output
 //	68      4     height the funding transaction was mined at, big-endian
+//
+// A record whose first 36 bytes are zero names no output: its height is
+// the floor.
 const (
 	RecordLen = 72
 	magic     = "BCSEEN\x01\n"
@@ -64,6 +69,7 @@ type Log struct {
 	f      *os.File
 	w      *bufio.Writer
 	m      map[Outpoint]entry
+	floor  uint32
 	dirty  bool
 	unlock func()
 }
@@ -104,7 +110,7 @@ func open(path string) (*Log, error) {
 			f.Close()
 			return nil, fmt.Errorf("%w: %s", ErrFormat, path)
 		}
-		if err := l.reset(nil); err != nil {
+		if err := l.reset(nil, 0); err != nil {
 			f.Close()
 			return nil, err
 		}
@@ -132,8 +138,10 @@ func open(path string) (*Log, error) {
 		copy(e.carrier[:], rec[36:68])
 		e.height = binary.BigEndian.Uint32(rec[68:])
 		// The first record of an output stands: it is the carrier that
-		// was accepted.
-		if _, ok := l.m[o]; !ok {
+		// was accepted. The record of no output holds the floor.
+		if o == (Outpoint{}) {
+			l.floor = max(l.floor, e.height)
+		} else if _, ok := l.m[o]; !ok {
 			l.m[o] = e
 		}
 		whole += RecordLen
@@ -156,8 +164,11 @@ func open(path string) (*Log, error) {
 	return l, nil
 }
 
-// reset makes the file hold exactly the records of keep, durably.
-func (l *Log) reset(keep map[Outpoint]entry) error {
+// reset makes the file hold exactly the floor and the records of keep,
+// durably. Both files are closed before the one replaces the other, which
+// some platforms require, and the log is opened again after. If the
+// replacement fails the old file is opened again and nothing is lost.
+func (l *Log) reset(keep map[Outpoint]entry, floor uint32) error {
 	tmp, err := os.CreateTemp(filepath.Dir(l.path), filepath.Base(l.path)+".*")
 	if err != nil {
 		return err
@@ -165,38 +176,49 @@ func (l *Log) reset(keep map[Outpoint]entry) error {
 	defer os.Remove(tmp.Name())
 	bw := bufio.NewWriterSize(tmp, 1<<20)
 	_, _ = bw.WriteString(magic)
+	if floor > 0 {
+		_, _ = bw.Write(record(Outpoint{}, entry{height: floor}))
+	}
 	for o, e := range keep {
 		_, _ = bw.Write(record(o, e))
 	}
-	if err := bw.Flush(); err != nil {
-		tmp.Close()
+	err = bw.Flush()
+	if err == nil {
+		err = tmp.Chmod(0o600)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
 		return err
 	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := os.Rename(tmp.Name(), l.path); err != nil {
-		tmp.Close()
-		return err
-	}
-	syncDir(filepath.Dir(l.path))
 	if l.f != nil {
 		l.f.Close()
+		l.f = nil
 	}
-	if _, err := tmp.Seek(0, io.SeekEnd); err != nil {
-		tmp.Close()
-		return err
+	rerr := os.Rename(tmp.Name(), l.path)
+	if rerr == nil {
+		syncDir(filepath.Dir(l.path))
 	}
-	l.f, l.w, l.dirty = tmp, bufio.NewWriterSize(tmp, 64<<10), false
+	f, err := os.OpenFile(l.path, os.O_RDWR, 0o600)
+	if err != nil {
+		return errors.Join(rerr, err)
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		f.Close()
+		return errors.Join(rerr, err)
+	}
+	l.f, l.w, l.dirty = f, bufio.NewWriterSize(f, 64<<10), false
+	if rerr != nil {
+		return rerr
+	}
 	if keep == nil {
 		keep = map[Outpoint]entry{}
 	}
-	l.m = keep
+	l.m, l.floor = keep, floor
 	return nil
 }
 
@@ -256,11 +278,22 @@ func (l *Log) Sync() error {
 	return nil
 }
 
-// Prune drops the records of outputs mined below height, and returns how
-// many it dropped. The file is rewritten whole and replaced.
+// Floor is the height below which the log no longer holds records: the
+// highest height it was ever pruned to. An output mined below it may have
+// been seen and forgotten, so a reader does not take one.
+func (l *Log) Floor() uint32 { return l.floor }
+
+// Prune drops the records of outputs mined below height, raises the floor
+// to height, and returns how many records it dropped. The floor is kept in
+// the file and never falls, so a later prune to a lower height, as after
+// a header source reports a lower tip, forgets nothing and admits nothing
+// that was forgotten. The file is rewritten whole and replaced.
 func (l *Log) Prune(height uint32) (int, error) {
 	if err := l.Sync(); err != nil {
 		return 0, err
+	}
+	if height <= l.floor {
+		return 0, nil
 	}
 	keep := make(map[Outpoint]entry, len(l.m))
 	for o, e := range l.m {
@@ -268,11 +301,7 @@ func (l *Log) Prune(height uint32) (int, error) {
 			keep[o] = e
 		}
 	}
-	dropped := len(l.m) - len(keep)
-	if dropped == 0 {
-		return 0, nil
-	}
-	return dropped, l.reset(keep)
+	return len(l.m) - len(keep), l.reset(keep, height)
 }
 
 // Close syncs and releases the file and its lock.

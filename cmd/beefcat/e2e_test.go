@@ -1258,8 +1258,33 @@ func TestSeenForgetsOldOutputs(t *testing.T) {
 	if !strings.Contains(e, "forgot 1 funding output(s)") {
 		t.Fatalf("the old output was kept:\n%s", e)
 	}
-	if st, err := os.Stat(seenFile); err != nil || st.Size() != 8 {
+	// The record holds no output now, only the height it was cleared to.
+	if st, err := os.Stat(seenFile); err != nil || st.Size() != 8+72 {
 		t.Fatalf("the record: %v, %v", st, err)
+	}
+	// What the record forgot it does not take again: not under a longer
+	// limit, and not from a header source whose tip has fallen back to
+	// where the postage was young.
+	code, out, e = r.verify(s, "-k", r.key, "-seen", seenFile, "-max-age", "100")
+	if out = refused(t, "REFUSED-STALE", code, out, e); len(out) != 0 || !strings.Contains(e, "was cleared of older ones") {
+		t.Fatalf("a forgotten output under a longer limit:\n%s", e)
+	}
+	low := r.chain.Height() - 3
+	fallen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, q *http.Request) {
+		if q.URL.Path == "/v1/tip" {
+			fmt.Fprintf(w, `{"height":%d}`, low)
+			return
+		}
+		r.chain.ServeHTTP(w, q)
+	}))
+	defer fallen.Close()
+	code, out, e = cat(t, s, "verify", "-network", "regtest", "-headers", fallen.URL, "-k", r.key, "-seen", seenFile, "-max-age", "2")
+	if out = refused(t, "REFUSED-STALE", code, out, e); len(out) != 0 || !strings.Contains(e, "was cleared of older ones") {
+		t.Fatalf("a forgotten output under a tip that fell:\n%s", e)
+	}
+	// Without the record the same stream, under that tip, is young.
+	if code, _, e := cat(t, s, "verify", "-network", "regtest", "-headers", fallen.URL, "-k", r.key, "-max-age", "2"); code != 0 {
+		t.Fatalf("the fallen tip does not make the postage young: %d\n%s", code, e)
 	}
 }
 

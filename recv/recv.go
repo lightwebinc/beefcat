@@ -85,6 +85,9 @@ type Seen interface {
 	Add(o Outpoint, carrier [32]byte, height uint32) error
 	// Sync makes every record added so far durable.
 	Sync() error
+	// Floor is the height below which the record no longer holds outputs:
+	// one mined below it may have been seen and forgotten.
+	Floor() uint32
 }
 
 // Options are a reader's choices.
@@ -390,6 +393,11 @@ func Receive(ctx context.Context, r io.Reader, w io.Writer, o Options) (Summary,
 			return failed(c.retracted)
 		}
 		if o.Seen != nil {
+			// What the record forgot it cannot vouch for, whatever the
+			// tip says today.
+			if floor := o.Seen.Floor(); c.height < floor {
+				return refuse(RefusedStale, "funding transaction %s was mined at height %d, below height %d, from which your record of outputs seen was cleared of older ones: its postage is too old", c.tree, c.height, floor)
+			}
 			if by, ok := o.Seen.Lookup(c.op); ok {
 				if by == c.txid {
 					return refuse(RefusedReplay, "this carrier was accepted before: funding output %s is in your record of outputs seen, under this same carrier", c.outpoint)
