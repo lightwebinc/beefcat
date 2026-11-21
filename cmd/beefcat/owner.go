@@ -849,8 +849,8 @@ func (g *global) refusedSweep(tree string, count uint32, tx *transaction.Transac
 		fmt.Sprintf("Sweep %s of tree %s: %s", tx.TxID(), tree, strings.TrimPrefix(err.Error(), "sweep: "))}
 	funding := func(outpoint string) bool {
 		txid, vout, _ := strings.Cut(outpoint, ".")
-		v, err := strconv.ParseUint(vout, 10, 32)
-		return err == nil && txid == tree && v < uint64(count)
+		v, perr := strconv.ParseUint(vout, 10, 32)
+		return perr == nil && txid == tree && v < uint64(count)
 	}
 	var se *nodeapi.SpentError
 	if errors.As(err, &se) && funding(se.Outpoint) {
