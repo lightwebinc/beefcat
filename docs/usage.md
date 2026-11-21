@@ -22,6 +22,10 @@ beefcat version
 A receiver needs no home, no key and no coin. A sender needs a home
 (`init`) and postage (`fund`).
 
+`-q`, on any command, prints nothing on standard error when all is well:
+no progress notes and no report of a verified stream. Banners and errors
+are always printed.
+
 ### Sending
 
 | Flag | Default | Meaning |
@@ -67,9 +71,9 @@ been spent.
 | `-seen FILE` | | keep a record in FILE of the funding outputs accepted, and refuse a carrier on one already there |
 | `-w DURATION` | `2m` | how long a silent connection is kept |
 
-`beefcat verify` takes the same flags and reads a stream from a file or
-standard input. What is checked, and how each failure is reported, is in
-[verification.md](verification.md).
+`beefcat verify` takes the same flags but `-l` and `-w`, and reads a
+stream from a file or standard input. What is checked, and how each
+failure is reported, is in [verification.md](verification.md).
 
 `-seen FILE` makes a receiver take a stream once. FILE is created when it
 is not there, holds 72 bytes per carrier accepted, and is used by one
@@ -92,7 +96,7 @@ included, ends it with a refusal. Listen where only the sender reaches.
 ### init
 
 ```text
-beefcat init [-network main|test|regtest] [-headers S] [-chain S] [-settle S] [-devchain URL]
+beefcat init [-network main|test|regtest] [-headers S] [-chain S] [-settle S] [-rpc URL] [-devchain URL]
 ```
 
 Creates the home (mode 0700) with a new identity key and an empty coin
@@ -127,7 +131,7 @@ fund address from your own wallet, then import that payment:
 | --- | --- |
 | `-txid TXID` | import a mined payment, read from the chain view and checked against the header source |
 | `-beef FILE` | import a mined payment as the BEEF your wallet hands over, binary or hex, with no lookup; `-` is standard input |
-| `-coinbase` | mine coinbase to the fund address on a local chain. Coinbase: only on a regtest chain you run, for development and tests |
+| `-coinbase` | mine coinbase to the fund address on a local chain. Coinbase: only on a regtest chain you run, for development and tests. It needs the node's JSON-RPC (`-rpc URL`, here or recorded by `init`) and an `asset:URL` chain view; `init -devchain` records both |
 
 `fund -n 0 -txid TXID` imports a payment and mints nothing.
 
@@ -153,8 +157,9 @@ beefcat sweep [-tree TXID] -yes
 ```
 
 Spends every funding output of the home's trees, or of one tree, in one
-mined transaction per tree, and waits for its block. This is how a sender
-retracts: once the sweep is mined, a receiver that checks spends
+mined transaction per tree, and waits up to `-wait` (default 30 minutes)
+for its block. This is how a sender retracts: once the sweep is mined, a
+receiver that checks spends
 (`-unspent`) refuses every carrier those outputs funded. Outputs not yet
 used go with them, so the tree funds nothing more. The sweep's miner fee
 comes from the pool. Without `-yes` it prints what it would do and spends
@@ -173,7 +178,9 @@ beefcat withdraw -redeliver TXID
 Pays coin out of the home's pool. Without `-sats` it pays the pool's
 largest coin whole, less the miner fee. Funding outputs already minted are
 postage, not coin, and are not withdrawn. Without `-yes` it prints what it
-would do and spends nothing.
+would do and spends nothing. It waits up to `-wait` (default 30 minutes)
+for the block that mines the payment; a payment not mined by then is
+still made, and its change is held until a later command finds it mined.
 
 | TO | Payment |
 | --- | --- |

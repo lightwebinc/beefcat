@@ -46,7 +46,7 @@ Send:
 $ head -c 5000000 /dev/urandom > sent.bin
 $ beefcat 127.0.0.1 9000 < sent.bin
 beefcat: sent 2 carrier(s), 5000000 bytes of data ...
-beefcat: the far end says: VERIFIED carriers=2 bytes=5000000
+beefcat: the far end says: VERIFIED carriers=2 bytes=5000000 age=not-checked replay=not-checked
 $ cmp sent.bin received.bin
 ```
 
