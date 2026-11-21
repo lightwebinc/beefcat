@@ -39,7 +39,7 @@ stopping at the first that fails:
 | 11 | SPV: the input's signature satisfies the funding output, and the Merkle path leads to a root your header source holds at that height | `REFUSED-SIG`, `REFUSED-BUMP` |
 | 12 | With `-max-age` or `-min-conf`: the funding transaction lies no more blocks below your header source's tip than you allow, and has the confirmations you require | `REFUSED-STALE` |
 | 13 | With `-unspent`: the chain view shows the funding output unspent, or spent by this carrier | `REFUSED-RETRACTED` |
-| 14 | With `-seen`: the funding output is not in your record of outputs you accepted carriers on | `REFUSED-REPLAY`, `REFUSED-FORK` |
+| 14 | With `-seen`: the funding transaction was mined no lower than the height your record of outputs you accepted carriers on was cleared to, and the funding output is not in that record | `REFUSED-STALE`, `REFUSED-REPLAY`, `REFUSED-FORK` |
 | 15 | The sender is one you pinned with `-k`, if you pinned any | `REFUSED-UNTRUSTED` |
 
 Only then is the carrier's data written. After the carrier that signs

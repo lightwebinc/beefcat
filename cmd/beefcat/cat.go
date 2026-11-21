@@ -274,7 +274,8 @@ func (g *global) farEnd(line string) int {
 	word, rest, _ := strings.Cut(strings.TrimPrefix(line, "beefcat "), " ")
 	switch {
 	case line == "":
-		g.say("the far end closed without a verdict: it may not be beefcat, or it stopped")
+		g.banner(yellow, "THE FAR END CLOSED WITHOUT A VERDICT",
+			"It may not be beefcat, or it stopped. This data is not known to be verified there.")
 		return exitError
 	case word == string(verify.Verified):
 		g.say("the far end says: VERIFIED %s", termsafe.Text(rest))

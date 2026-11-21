@@ -62,7 +62,7 @@ Over TCP, after reading the stream to its end, a listener answers with
 one line and closes:
 
 ```text
-beefcat VERIFIED carriers=<n> bytes=<n>
+beefcat VERIFIED carriers=<n> bytes=<n> age=<n|not-checked> replay=<checked|not-checked>
 beefcat <REFUSED-CODE> carrier=<index> <reason>
 beefcat ERROR <reason>
 ```
