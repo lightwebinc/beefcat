@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -680,7 +681,10 @@ few satoshis; it is not a way to recover coin.
 A sweep not mined within -wait is waited for again by the next sweep -yes.
 A sweep the network refuses, because a coin it spends is spent by another
 transaction, never mines and retracts nothing: a banner says so, and the
-next sweep -yes sweeps the tree with a new transaction.
+next sweep -yes sweeps the tree with a new transaction. When that coin is
+one of the tree's outputs, which only this home's key can spend, another
+copy of the home spent it: that spend retracts what it spends once mined,
+and no sweep of the whole tree can mine beside it.
 
 Nothing is spent without -yes.`
 
@@ -757,7 +761,7 @@ func cmdSweep(ctx context.Context, g *global, args []string) error {
 				if serr := st.Save(); serr != nil {
 					return serr
 				}
-				g.refusedSweep(id, tx.TxID().String(), err)
+				g.refusedSweep(id, t.Count, tx, err, true)
 				return fmt.Errorf("sweep of tree %s: the network refused it", id)
 			}
 			if err != nil {
@@ -815,7 +819,7 @@ func cmdSweep(ctx context.Context, g *global, args []string) error {
 					return serr
 				}
 				if refused {
-					g.refusedSweep(id, tx.TxID().String(), err)
+					g.refusedSweep(id, t.Count, tx, err, false)
 					return fmt.Errorf("sweep of tree %s: the network refused it", id)
 				}
 				return fmt.Errorf("sweep of tree %s: %w", id, err)
@@ -832,10 +836,41 @@ func cmdSweep(ctx context.Context, g *global, args []string) error {
 	return nil
 }
 
-// refusedSweep says, loudly, that the network will never mine the sweep of
-// a tree: an input of it is spent by another transaction.
-func (g *global) refusedSweep(tree, sweep string, err error) {
-	g.banner(red, "THE NETWORK REFUSED THE SWEEP: IT RETRACTS NOTHING",
-		fmt.Sprintf("Sweep %s of tree %s: %s", sweep, tree, strings.TrimPrefix(err.Error(), "sweep: ")),
-		"Until a sweep of the tree is mined, a receiver that checks spends (-unspent) still accepts what its unspent outputs carried. Run beefcat sweep -yes again to sweep it with a new transaction.")
+// refusedSweep says, loudly, that the network will never mine tx, the sweep
+// of a tree of count funding outputs: an input of it is spent by another
+// transaction. A funding output is signed for only under this home's key,
+// so one spent elsewhere was spent by another copy of this home, and no
+// sweep of the whole tree can mine beside that spend. earlier is set for a
+// sweep an earlier run made: this run never took its fee coin, so a fee
+// coin the refusal does not show spent is in neither the pool nor, once the
+// record goes, the home, and is named with how to take it back.
+func (g *global) refusedSweep(tree string, count uint32, tx *transaction.Transaction, err error, earlier bool) {
+	lines := []string{"THE NETWORK REFUSED THE SWEEP: IT RETRACTS NOTHING",
+		fmt.Sprintf("Sweep %s of tree %s: %s", tx.TxID(), tree, strings.TrimPrefix(err.Error(), "sweep: "))}
+	funding := func(outpoint string) bool {
+		txid, vout, _ := strings.Cut(outpoint, ".")
+		v, err := strconv.ParseUint(vout, 10, 32)
+		return err == nil && txid == tree && v < uint64(count)
+	}
+	var se *nodeapi.SpentError
+	if errors.As(err, &se) && funding(se.Outpoint) {
+		lines = append(lines, "Funding output "+se.Outpoint+" of the tree is spent by "+se.By+", which only this home's key can sign: another copy of this home spent it. That transaction retracts what the outputs it spends carried once it is mined, and no sweep of every output of the tree can mine beside it.")
+	} else {
+		lines = append(lines, "Until a sweep of the tree is mined, a receiver that checks spends (-unspent) still accepts what its unspent outputs carried. Run beefcat sweep -yes again to sweep it with a new transaction.")
+	}
+	for _, in := range tx.Inputs {
+		if in.SourceTXID == nil {
+			continue
+		}
+		fee := fmt.Sprintf("%s.%d", in.SourceTXID, in.SourceTxOutIndex)
+		if !earlier || funding(fee) {
+			continue
+		}
+		if se != nil && se.Outpoint == fee {
+			lines = append(lines, "Its fee coin "+fee+" is spent by "+se.By+".")
+			continue
+		}
+		lines = append(lines, "Its fee coin "+fee+" is not in the pool: if no other transaction has spent it, beefcat fund -n 0 -txid "+in.SourceTXID.String()+" takes it back.")
+	}
+	g.banner(red, lines...)
 }

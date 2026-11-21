@@ -169,7 +169,13 @@ A sweep not mined within `-wait` is waited for again by the next
 `sweep -yes`. A sweep the network refuses, because a coin it spends is
 spent by another transaction, never mines and retracts nothing: beefcat
 says so in a banner and exits nonzero, and the next `sweep -yes` sweeps
-the tree with a new transaction.
+the tree with a new transaction. When that coin is one of the tree's
+outputs, which only the home's key can spend, another copy of the home
+spent it: that spend retracts what it spends once it is mined, and no
+sweep of the whole tree can mine beside it. The banner of a sweep an
+earlier run broadcast also names its fee coin, which is not in the pool,
+and `beefcat fund -n 0 -txid TXID` takes back that coin if nothing else
+spent it.
 
 A retraction reaches only receivers that look. A receiver that verified
 the data before the sweep, or that does not use `-unspent`, still has it.

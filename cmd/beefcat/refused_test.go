@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/bsv-blockchain/go-sdk/wallet"
 
 	"github.com/lightwebinc/bcommon/bwallet"
@@ -257,31 +259,75 @@ func sweptBy(t *testing.T, h string) (string, string) {
 	return "", ""
 }
 
-// A sweep broadcast by an earlier run and refused since is reported in a
-// banner, and its record goes, so the next sweep makes a new one. The tree
-// stays closed to sends.
-func TestSweepRefusedIsLoud(t *testing.T) {
-	r := newRig(t, 1)
+// refuseEarlierSweep leaves a sweep broadcast by one run, not mined, then
+// marks input in of it spent by another transaction and runs sweep -yes
+// again. It returns that run's exit status and its stderr with the banner's
+// lines joined, and the sweep's transaction.
+func refuseEarlierSweep(t *testing.T, r *rig, in func(n int) int) (int, string, *transaction.Transaction) {
+	t.Helper()
 	r.chain.SetHold(true)
 	code, o, e := cat(t, nil, "sweep", "-home", r.home, "-wait", "100ms", "-yes")
 	if code != exitError || !strings.Contains(e, "the sweep is broadcast") {
 		t.Fatalf("a sweep not mined in time: %d\n%s%s", code, o, e)
 	}
 	sweep, _ := sweptBy(t, r.home)
-	if sweep == "" {
-		t.Fatal("the sweep is not recorded")
+	tx := r.chain.Tx(sweep)
+	if sweep == "" || tx == nil {
+		t.Fatal("the sweep is not recorded, or not on the chain")
 	}
-	spendFirstInput(t, r.chain, sweep)
+	spent := tx.Inputs[in(len(tx.Inputs))]
+	r.chain.SpendElsewhere(spent.SourceTXID.String(), spent.SourceTxOutIndex, other)
 	code, o, e = cat(t, nil, "sweep", "-home", r.home, "-q", "-yes")
 	if code != exitError {
 		t.Fatalf("exit %d, want %d\n%s%s", code, exitError, o, e)
 	}
-	e = loud(t, e, "THE NETWORK REFUSED THE SWEEP: IT RETRACTS NOTHING")
-	if !strings.Contains(e, sweep) || !strings.Contains(e, "beefcat sweep -yes again") {
-		t.Fatalf("the banner does not name the sweep or what to do:\n%s", e)
+	return code, loud(t, e, "THE NETWORK REFUSED THE SWEEP: IT RETRACTS NOTHING"), tx
+}
+
+// A sweep broadcast by an earlier run and refused since is reported in a
+// banner, and its record goes. The tree stays closed to sends. A tree
+// output spent elsewhere was spent by another copy of the home, so the
+// banner says no sweep of the whole tree can mine, and names the earlier
+// run's fee coin, which is in no pool, with the command that takes it back.
+func TestSweepRefusedIsLoud(t *testing.T) {
+	r := newRig(t, 1)
+	_, e, tx := refuseEarlierSweep(t, r, func(int) int { return 0 })
+	tree, fee := tx.Inputs[0].SourceTXID.String(), tx.Inputs[len(tx.Inputs)-1]
+	for _, want := range []string{
+		tx.TxID().String(),
+		"Funding output " + tree + ".0 of the tree is spent by " + other,
+		"another copy of this home spent it",
+		fmt.Sprintf("Its fee coin %s.%d is not in the pool", fee.SourceTXID, fee.SourceTxOutIndex),
+		"beefcat fund -n 0 -txid " + fee.SourceTXID.String() + " takes it back",
+	} {
+		if !strings.Contains(e, want) {
+			t.Fatalf("the banner does not say %q:\n%s", want, e)
+		}
+	}
+	if strings.Contains(e, "beefcat sweep -yes again") {
+		t.Fatalf("the banner says to sweep again, which cannot mine:\n%s", e)
 	}
 	if by, line := sweptBy(t, r.home); by != "" || !strings.Contains(line, " 0 of 1 left") {
 		t.Fatalf("after the refusal: %s", line)
+	}
+}
+
+// An earlier run's sweep refused for its fee coin, spent elsewhere, can be
+// made again: the banner says to, and that the coin is gone.
+func TestSweepRefusedForItsFeeCoinIsLoud(t *testing.T) {
+	r := newRig(t, 1)
+	_, e, tx := refuseEarlierSweep(t, r, func(n int) int { return n - 1 })
+	fee := tx.Inputs[len(tx.Inputs)-1]
+	for _, want := range []string{
+		"beefcat sweep -yes again",
+		fmt.Sprintf("Its fee coin %s.%d is spent by %s.", fee.SourceTXID, fee.SourceTxOutIndex, other),
+	} {
+		if !strings.Contains(e, want) {
+			t.Fatalf("the banner does not say %q:\n%s", want, e)
+		}
+	}
+	if strings.Contains(e, "another copy of this home") || strings.Contains(e, "takes it back") {
+		t.Fatalf("the banner blames the tree, or offers back a spent coin:\n%s", e)
 	}
 }
 
