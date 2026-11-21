@@ -179,8 +179,9 @@ Pays coin out of the home's pool. Without `-sats` it pays the pool's
 largest coin whole, less the miner fee. Funding outputs already minted are
 postage, not coin, and are not withdrawn. Without `-yes` it prints what it
 would do and spends nothing. It waits up to `-wait` (default 30 minutes)
-for the block that mines the payment; a payment not mined by then is
-still made, and its change is held until a later command finds it mined.
+for the block that mines the payment. A payment not mined by then is
+broadcast but not certain to mine; its change is held until a later
+command finds it mined.
 
 | TO | Payment |
 | --- | --- |
