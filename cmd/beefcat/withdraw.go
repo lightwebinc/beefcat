@@ -20,6 +20,7 @@ import (
 
 	"github.com/lightwebinc/bcommon/funding"
 	"github.com/lightwebinc/bcommon/mint"
+	"github.com/lightwebinc/bcommon/producer"
 
 	"github.com/lightwebinc/beefcat/internal/peerpay"
 )
@@ -44,6 +45,13 @@ ever stranded.
 Without -sats, the largest coin in the pool is paid out whole, less the
 miner fee. Funding outputs already minted are postage, not coin: they are
 not withdrawn (see beefcat sweep).
+
+The payment is broadcast, then waited for up to -wait for the block that
+mines it. One not mined by then can still mine: its change is held, and
+the next fund, sweep or withdraw puts it in the pool once it has mined. A
+payment the network refuses, because a coin it spends is spent by another
+transaction, never mines: a banner says so, its change is not booked, and
+a withdraw still waiting for it exits nonzero.
 
 Nothing is spent without -yes.`
 
@@ -170,6 +178,9 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := e.collect(ctx); err != nil {
+		return err
+	}
 	var largest uint64
 	for _, o := range h.e.Pool.Outputs() {
 		if o.Spendable(e.payer.Tip) && o.Satoshis > largest {
@@ -232,14 +243,45 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 		derr = g.deliverNotice(ctx, sg, n, path)
 	}
 	mp, height, err := e.payer.Await(ctx, "payment", tx)
-	if err != nil {
+	switch {
+	case errors.Is(err, producer.ErrRefused):
+		// It never mines: its change is not booked, and its coin goes back
+		// to the pool only if the refusal did not show it spent by another
+		// transaction (producer.Payer.Await takes such a coin out).
+		_, back := e.payer.Reserved(fee)
+		e.payer.GiveBack()
+		coin := "The coin it spent is spent by another transaction and is out of the pool."
+		if back {
+			coin = "The coin it spent is back in the pool."
+		}
+		g.refusedPayment(n.Txid, err, "No change from it is booked. "+coin)
+		return errors.New("withdraw: the network refused the payment")
+	case err != nil:
+		// Not mined in time, or the chain view could not say: the payment
+		// can still mine, so its change is held (engine.collect).
 		e.payer.Change(tx, 0, nil)
-		g.say("the payment is broadcast and not mined yet (%v); its change is held until a later command collects the proof", err)
+		g.say("the payment is broadcast and not known to be mined (%v); its change is held until a later fund, sweep or withdraw finds it mined", err)
 		return derr
 	}
 	e.payer.Change(tx, height, mp)
 	fmt.Fprintf(g.stdout, "  mined at height %d; pool %d output(s), %d sat\n", height, h.e.Pool.Count(), h.e.Pool.Balance())
 	return derr
+}
+
+// refusedPayment says, loudly, that the network will never mine payment
+// txid: an input of it is spent by another transaction. err is the
+// refusal, and pool what became of the coin.
+func (g *global) refusedPayment(txid string, err error, pool string) {
+	lines := []string{"THE NETWORK REFUSED THE PAYMENT: IT WILL NEVER BE MINED",
+		fmt.Sprintf("Payment %s: %s", txid, strings.TrimPrefix(err.Error(), "payment: ")),
+		"The recipient receives nothing. " + pool}
+	if n, path, nerr := g.readNotice(txid); nerr == nil && n.Recipient != "" {
+		if n.Delivered {
+			lines = append(lines, "Its notice reached the payment inbox of "+n.Recipient+": tell the recipient that the payment is void.")
+		}
+		lines = append(lines, "Its notice stays in "+path+"; do not deliver it again.")
+	}
+	g.banner(red, lines...)
 }
 
 // deliverNotice hands a BRC-29 payment to its recipient's inbox and marks

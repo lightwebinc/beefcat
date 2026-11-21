@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -381,6 +382,56 @@ func (e *engine) recover(ctx context.Context) error {
 	return nil
 }
 
+// collect asks the chain view what became of each transaction whose change
+// the pool holds back: a payment that had not mined when withdraw stopped
+// waiting for it. Change from one that has mined becomes spendable. Change
+// from one the network refused, an input of it spent by another
+// transaction, is taken out of the pool with a banner, since that
+// transaction never mines. One the chain view cannot answer for stays held.
+func (e *engine) collect(ctx context.Context) error {
+	pool := e.h.e.Pool
+	held := map[string][]bwallet.Output{}
+	for _, o := range pool.Outputs() {
+		if o.Unproven {
+			held[o.TxID] = append(held[o.TxID], o)
+		}
+	}
+	proofs := producer.Proofs{Source: e.chain, Spends: e.chain, Tx: func(txid string) (*transaction.Transaction, error) {
+		raw, err := hex.DecodeString(held[txid][0].Raw)
+		if err != nil {
+			return nil, err
+		}
+		return guard.ParseTransaction(raw, guard.DefaultBound)
+	}}
+	for _, txid := range pool.UnprovenTxids() {
+		outs := held[txid]
+		if len(outs) == 0 {
+			continue
+		}
+		mp, height, err := proofs.Of(ctx, txid)
+		switch {
+		case err == nil:
+			n, err := pool.Prove(txid, funding.BumpHex(mp), height)
+			if err != nil {
+				return err
+			}
+			e.g.say("change from %s: mined at height %d; %d coin(s) spendable", txid, height, n)
+		case errors.Is(err, producer.ErrRefused):
+			var sats uint64
+			for _, o := range outs {
+				if _, err := pool.Remove(o); err != nil {
+					return err
+				}
+				sats += o.Satoshis
+			}
+			e.g.refusedPayment(txid, err, fmt.Sprintf("Its change, %d sat, was held in the pool until it mined, and is taken out.", sats))
+		case !errors.Is(err, nodeapi.ErrNotMined):
+			e.g.say("change from %s is held: the chain view could not say whether it mined (%v)", txid, err)
+		}
+	}
+	return nil
+}
+
 const fundHelp = `usage: beefcat fund [-n N] [-txid TXID | -beef FILE|-]
        beefcat fund [-n N] -coinbase        (regtest only)
 
@@ -438,6 +489,9 @@ func cmdFund(ctx context.Context, g *global, args []string) error {
 	defer h.close()
 	e, err := g.engine(ctx, h, *wait)
 	if err != nil {
+		return err
+	}
+	if err := e.collect(ctx); err != nil {
 		return err
 	}
 	if err := e.recover(ctx); err != nil {
@@ -623,6 +677,11 @@ have, so once the sweep is mined, a receiver that checks spends
 yet used are gone with them. It costs a miner fee and returns the outputs'
 few satoshis; it is not a way to recover coin.
 
+A sweep not mined within -wait is waited for again by the next sweep -yes.
+A sweep the network refuses, because a coin it spends is spent by another
+transaction, never mines and retracts nothing: a banner says so, and the
+next sweep -yes sweeps the tree with a new transaction.
+
 Nothing is spent without -yes.`
 
 func cmdSweep(ctx context.Context, g *global, args []string) error {
@@ -671,6 +730,9 @@ func cmdSweep(ctx context.Context, g *global, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := e.collect(ctx); err != nil {
+		return err
+	}
 	sg := h.e.Signer()
 	for _, id := range todo {
 		t := st.Tree(id)
@@ -686,6 +748,18 @@ func cmdSweep(ctx context.Context, g *global, args []string) error {
 			}
 			g.say("sweep %s of tree %s was broadcast by an earlier run; waiting for its block", sw.Txid, id)
 			mp, height, err := e.payer.Await(ctx, "sweep", tx)
+			if errors.Is(err, producer.ErrRefused) {
+				// It never mines, so its record goes and the next run sweeps
+				// the tree anew. The tree stays closed to sends: it was
+				// being retracted, and which of its outputs were used before
+				// is not recorded.
+				st.Sweeps = slices.DeleteFunc(st.Sweeps, func(s home.Sweep) bool { return s.Tree == id })
+				if serr := st.Save(); serr != nil {
+					return serr
+				}
+				g.refusedSweep(id, tx.TxID().String(), err)
+				return fmt.Errorf("sweep of tree %s: the network refused it", id)
+			}
 			if err != nil {
 				return fmt.Errorf("%w (run `beefcat sweep -yes` again later)", err)
 			}
@@ -730,13 +804,19 @@ func cmdSweep(ctx context.Context, g *global, args []string) error {
 		}
 		mp, height, err := e.payer.SettleAndWait(ctx, "sweep", tx)
 		if err != nil {
-			if errors.Is(err, producer.ErrRefused) || !strings.Contains(err.Error(), "waiting for a proof") {
-				// It never reached the chain: the record is undone.
+			refused := errors.Is(err, producer.ErrRefused)
+			if refused || !strings.Contains(err.Error(), "waiting for a proof") {
+				// It never reached the chain, or never mines: the record is
+				// undone.
 				st.Sweeps = st.Sweeps[:len(st.Sweeps)-1]
 				t.Next = used
 				e.payer.GiveBack()
 				if serr := st.Save(); serr != nil {
 					return serr
+				}
+				if refused {
+					g.refusedSweep(id, tx.TxID().String(), err)
+					return fmt.Errorf("sweep of tree %s: the network refused it", id)
 				}
 				return fmt.Errorf("sweep of tree %s: %w", id, err)
 			}
@@ -750,4 +830,12 @@ func cmdSweep(ctx context.Context, g *global, args []string) error {
 		fmt.Fprintf(g.stdout, "swept tree %s in %s, mined at height %d: %d output(s), %d of them carrying data already sent\n", id, tx.TxID(), height, t.Count, used)
 	}
 	return nil
+}
+
+// refusedSweep says, loudly, that the network will never mine the sweep of
+// a tree: an input of it is spent by another transaction.
+func (g *global) refusedSweep(tree, sweep string, err error) {
+	g.banner(red, "THE NETWORK REFUSED THE SWEEP: IT RETRACTS NOTHING",
+		fmt.Sprintf("Sweep %s of tree %s: %s", sweep, tree, strings.TrimPrefix(err.Error(), "sweep: ")),
+		"Until a sweep of the tree is mined, a receiver that checks spends (-unspent) still accepts what its unspent outputs carried. Run beefcat sweep -yes again to sweep it with a new transaction.")
 }

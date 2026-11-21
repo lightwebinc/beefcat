@@ -165,6 +165,12 @@ used go with them, so the tree funds nothing more. The sweep's miner fee
 comes from the pool. Without `-yes` it prints what it would do and spends
 nothing.
 
+A sweep not mined within `-wait` is waited for again by the next
+`sweep -yes`. A sweep the network refuses, because a coin it spends is
+spent by another transaction, never mines and retracts nothing: beefcat
+says so in a banner and exits nonzero, and the next `sweep -yes` sweeps
+the tree with a new transaction.
+
 A retraction reaches only receivers that look. A receiver that verified
 the data before the sweep, or that does not use `-unspent`, still has it.
 
@@ -179,9 +185,19 @@ Pays coin out of the home's pool. Without `-sats` it pays the pool's
 largest coin whole, less the miner fee. Funding outputs already minted are
 postage, not coin, and are not withdrawn. Without `-yes` it prints what it
 would do and spends nothing. It waits up to `-wait` (default 30 minutes)
-for the block that mines the payment. A payment not mined by then is
-broadcast but not certain to mine; its change is held until a later
-command finds it mined.
+for the block that mines the payment.
+
+A payment not mined by then is broadcast and can still mine. Its change
+is held, not spendable, and the next `fund`, `sweep` or `withdraw` asks
+the chain view about it and puts it in the pool once the payment has
+mined.
+
+A payment the network refuses, because a coin it spends is spent by
+another transaction, never mines and pays the recipient nothing. beefcat
+says so in a banner and books none of its change. Found while `withdraw`
+waits, the refusal also ends it with a nonzero exit status; found by a
+later command, it is reported and that command goes on. A notice already
+delivered for the payment names one that is void.
 
 | TO | Payment |
 | --- | --- |
