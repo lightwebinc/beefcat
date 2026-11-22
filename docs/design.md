@@ -94,8 +94,9 @@ Merkle path or the carrier is refused.
 
 **Loud by default.** A refusal, an unpinned sender and an undecided
 verification each print a banner that `-q` does not silence, and each has
-its own exit status. A tool whose point is to say when data should not be
-believed must not be easy to ignore.
+its own exit status. A payment or a sweep the network refuses, which never
+mines, gets the same banner. A tool whose point is to say when data should
+not be believed must not be easy to ignore.
 
 **Age is the postage's block height, and replay is the receiver's own
 record.** A carrier carries no clock a receiver could trust, so the only

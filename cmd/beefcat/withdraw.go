@@ -20,6 +20,7 @@ import (
 
 	"github.com/lightwebinc/bcommon/funding"
 	"github.com/lightwebinc/bcommon/mint"
+	"github.com/lightwebinc/bcommon/producer"
 
 	"github.com/lightwebinc/beefcat/internal/peerpay"
 )
@@ -39,11 +40,19 @@ puts that, with the payment and its proofs, in the recipient's payment
 inbox, encrypted to the recipient. It also writes the same notice to
 payments/<txid>.json in the home before anything is broadcast, so a
 delivery that fails can be repeated with -redeliver TXID and no coin is
-ever stranded.
+ever stranded. The notice of a payment beefcat finds refused is marked so,
+and -redeliver refuses it, loudly: that payment is void.
 
 Without -sats, the largest coin in the pool is paid out whole, less the
 miner fee. Funding outputs already minted are postage, not coin: they are
 not withdrawn (see beefcat sweep).
+
+The payment is broadcast, then waited for up to -wait for the block that
+mines it. One not mined by then can still mine: its change is held, and
+the next fund, sweep or withdraw puts it in the pool once it has mined. A
+payment the network refuses, because a coin it spends is spent by another
+transaction, never mines: a banner says so, its change is not booked, and
+a withdraw still waiting for it exits nonzero.
 
 Nothing is spent without -yes.`
 
@@ -58,9 +67,13 @@ type notice struct {
 	Suffix     string `json:"derivationSuffix,omitempty"`
 	MessageBox string `json:"messageBox,omitempty"`
 	// BeefHex is the payment as Atomic BEEF, with its proofs.
-	BeefHex   string    `json:"beef"`
-	Delivered bool      `json:"delivered,omitempty"`
-	At        time.Time `json:"at"`
+	BeefHex   string `json:"beef"`
+	Delivered bool   `json:"delivered,omitempty"`
+	// Refused is why the network refused the payment, once beefcat has
+	// found it refused: it never mines, and its notice is not delivered
+	// again.
+	Refused string    `json:"refused,omitempty"`
+	At      time.Time `json:"at"`
 }
 
 // deliver puts a payment in its recipient's inbox; tests replace it.
@@ -84,7 +97,7 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 	fs.StringVar(&g.fSettle, "settle", "", "settlement leg (default: the home's, else arcade:<network>)")
 	sats := fs.Uint64("sats", 0, "satoshis to pay; 0 pays the largest coin whole, less the fee")
 	box := fs.String("messagebox", "", "the recipient's message box server, for a payment to an identity key")
-	redeliver := fs.String("redeliver", "", "deliver again the notice of an earlier withdrawal, by its txid; spends nothing")
+	redeliver := fs.String("redeliver", "", "deliver again the notice of an earlier withdrawal, by its txid; spends nothing, and never delivers one the network refused")
 	yes := fs.Bool("yes", false, "actually pay; without it nothing is spent")
 	wait := fs.Duration("wait", 30*time.Minute, "how long to wait for the block that mines the payment")
 	pos, err := g.parse(fs, args)
@@ -107,6 +120,12 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 		}
 		if n.Recipient == "" {
 			return usage("withdrawal %s paid an address: there is nothing to deliver", n.Txid)
+		}
+		if n.Refused != "" {
+			g.banner(red, "THE NETWORK REFUSED THIS PAYMENT: ITS NOTICE IS NOT DELIVERED",
+				fmt.Sprintf("Payment %s: %s", n.Txid, n.Refused),
+				"It will never be mined, so its notice names a payment that is void, and nothing was sent to "+n.MessageBox+". The notice stays in "+path+".")
+			return errors.New("withdraw: the network refused that payment; its notice is not delivered")
 		}
 		if *box != "" {
 			n.MessageBox = *box
@@ -170,6 +189,13 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A preview changes nothing: held change is collected, and a refused
+	// payment's notice rewritten, only once -yes is given.
+	if *yes {
+		if err := e.collect(ctx); err != nil {
+			return err
+		}
+	}
 	var largest uint64
 	for _, o := range h.e.Pool.Outputs() {
 		if o.Spendable(e.payer.Tip) && o.Satoshis > largest {
@@ -192,6 +218,9 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 	}
 	if !*yes {
 		fmt.Fprintf(g.stdout, "would pay %d sat to %s on network %s: %s\nnothing was spent; run again with -yes\n", pay, to, g.cfg.Network, how)
+		if len(h.e.Pool.UnprovenTxids()) > 0 {
+			fmt.Fprintln(g.stdout, "change held from unmined payments is not counted; it is collected with -yes")
+		}
 		return nil
 	}
 	fee, err := e.payer.TakeAtLeast(ctx, need)
@@ -232,14 +261,59 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 		derr = g.deliverNotice(ctx, sg, n, path)
 	}
 	mp, height, err := e.payer.Await(ctx, "payment", tx)
-	if err != nil {
+	switch {
+	case errors.Is(err, producer.ErrRefused):
+		// It never mines: its change is not booked, and its coin goes back
+		// to the pool only if the refusal did not show it spent by another
+		// transaction (producer.Payer.Await takes such a coin out).
+		_, back := e.payer.Reserved(fee)
+		e.payer.GiveBack()
+		coin := "The coin it spent is spent by another transaction and is out of the pool."
+		if back {
+			coin = "The coin it spent is back in the pool."
+		}
+		return errors.Join(errors.New("withdraw: the network refused the payment"), g.refusedPayment(n.Txid, err, "No change from it is booked. "+coin), derr)
+	case err != nil:
+		// Not mined in time, or the chain view could not say: the payment
+		// can still mine, so its change is held (engine.collect).
 		e.payer.Change(tx, 0, nil)
-		g.say("the payment is broadcast and not mined yet (%v); its change is held until a later command collects the proof", err)
+		g.say("the payment is broadcast and not known to be mined (%v); its change is held until a later fund, sweep or withdraw finds it mined", err)
 		return derr
 	}
 	e.payer.Change(tx, height, mp)
 	fmt.Fprintf(g.stdout, "  mined at height %d; pool %d output(s), %d sat\n", height, h.e.Pool.Count(), h.e.Pool.Balance())
 	return derr
+}
+
+// refusedPayment says, loudly, that the network will never mine payment
+// txid: an input of it is spent by another transaction. err is the
+// refusal, and pool what became of the coin. The payment's notice records
+// the refusal, so that -redeliver never delivers it; the error is a notice
+// that could not be written.
+func (g *global) refusedPayment(txid string, err error, pool string) error {
+	why := strings.TrimPrefix(err.Error(), "payment: ")
+	lines := []string{"THE NETWORK REFUSED THE PAYMENT: IT WILL NEVER BE MINED",
+		fmt.Sprintf("Payment %s: %s", txid, why), "The recipient receives nothing. " + pool}
+	n, path, nerr := g.readNotice(txid)
+	var werr error
+	if nerr == nil {
+		n.Refused = why
+		if _, werr = g.writeNotice(n); werr != nil {
+			werr = fmt.Errorf("the notice %s does not record the refusal: %w", path, werr)
+		}
+	}
+	if nerr == nil && n.Recipient != "" {
+		if n.Delivered {
+			lines = append(lines, "Its notice reached the payment inbox of "+n.Recipient+": tell the recipient that the payment is void.")
+		}
+		if werr != nil {
+			lines = append(lines, "Its notice stays in "+path+" but could not be marked refused: do not deliver it again.")
+		} else {
+			lines = append(lines, "Its notice stays in "+path+", marked refused: beefcat withdraw -redeliver does not deliver it.")
+		}
+	}
+	g.banner(red, lines...)
+	return werr
 }
 
 // deliverNotice hands a BRC-29 payment to its recipient's inbox and marks
