@@ -169,7 +169,7 @@ func TestWithdrawRefusedAfterDeliveryIsLoud(t *testing.T) {
 		t.Fatalf("exit %d, want %d\n%s%s", code, exitError, o, e)
 	}
 	e = loud(t, e, "THE NETWORK REFUSED THE PAYMENT: IT WILL NEVER BE MINED")
-	if !strings.Contains(e, "Its notice reached the payment inbox of "+rhex) || !strings.Contains(e, "do not deliver it again") {
+	if !strings.Contains(e, "Its notice reached the payment inbox of "+rhex) || !strings.Contains(e, "marked refused: beefcat withdraw -redeliver does not deliver it") {
 		t.Fatalf("the banner does not say the notice was delivered:\n%s", e)
 	}
 }
@@ -344,5 +344,62 @@ func TestSweepRefusedWhileWaitingIsLoud(t *testing.T) {
 	loud(t, e, "THE NETWORK REFUSED THE SWEEP: IT RETRACTS NOTHING")
 	if by, line := sweptBy(t, r.home); by != "" || !strings.Contains(line, " 1 of 1 left") {
 		t.Fatalf("after the refusal: %s", line)
+	}
+}
+
+// The notice of a payment the network refused is never delivered again,
+// whether withdraw found the refusal while it waited or a later command
+// found it: -redeliver refuses it in a banner naming the payment, and the
+// message box is not asked.
+func TestRedeliverOfARefusedPaymentIsRefused(t *testing.T) {
+	for _, later := range []bool{false, true} {
+		r := newRig(t, 1)
+		r.chain.SetHold(true)
+		rk, err := ec.NewPrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		link := "peerpay:" + hex.EncodeToString(rk.PubKey().Compressed()) + "?url=https%3A%2F%2Fbox.example.com"
+		deliveries := 0
+		old := deliver
+		deliver = func(_ context.Context, _ string, _ wallet.Interface, _ peerpay.Message) error {
+			deliveries++
+			if !later {
+				// A competing spend of the payment's coin gets there first.
+				for _, id := range r.chain.Txids() {
+					if !r.chain.Mined(id) {
+						spendFirstInput(t, r.chain, id)
+					}
+				}
+			}
+			return nil
+		}
+		wait := "1m"
+		if later {
+			wait = "100ms"
+		}
+		code, o, e := cat(t, nil, "withdraw", "-home", r.home, "-q", "-sats", "4000", "-wait", wait, "-yes", link)
+		txid := txidIn(t, o)
+		if later {
+			if code != 0 {
+				deliver = old
+				t.Fatalf("a payment not mined in time: %d\n%s%s", code, o, e)
+			}
+			spendFirstInput(t, r.chain, txid)
+			code, o, e = cat(t, nil, "fund", "-home", r.home, "-q", "-n", "0")
+		}
+		if !strings.Contains(e, "THE NETWORK REFUSED THE PAYMENT") || deliveries != 1 {
+			deliver = old
+			t.Fatalf("later %v: no refusal, or %d deliveries: %d\n%s%s", later, deliveries, code, o, e)
+		}
+		code, o, e = cat(t, nil, "withdraw", "-home", r.home, "-q", "-redeliver", txid)
+		deliver = old
+		if code != exitError || deliveries != 1 {
+			t.Fatalf("later %v: -redeliver of a refused payment: exit %d, %d deliveries\n%s%s", later, code, deliveries, o, e)
+		}
+		e = loud(t, e, "THE NETWORK REFUSED THIS PAYMENT: ITS NOTICE IS NOT DELIVERED")
+		if !strings.Contains(e, "Payment "+txid+": ") || !strings.Contains(e, "spent by "+other) {
+			t.Fatalf("later %v: the banner does not name the payment and why:\n%s", later, e)
+		}
 	}
 }

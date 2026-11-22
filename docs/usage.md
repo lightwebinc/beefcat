@@ -203,7 +203,9 @@ another transaction, never mines and pays the recipient nothing. beefcat
 says so in a banner and books none of its change. Found while `withdraw`
 waits, the refusal also ends it with a nonzero exit status; found by a
 later command, it is reported and that command goes on. A notice already
-delivered for the payment names one that is void.
+delivered for the payment names one that is void. The kept notice is
+marked refused, and `-redeliver` refuses it in a banner rather than
+deliver it.
 
 | TO | Payment |
 | --- | --- |

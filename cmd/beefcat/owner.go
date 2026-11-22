@@ -425,7 +425,9 @@ func (e *engine) collect(ctx context.Context) error {
 				}
 				sats += o.Satoshis
 			}
-			e.g.refusedPayment(txid, err, fmt.Sprintf("Its change, %d sat, was held in the pool until it mined, and is taken out.", sats))
+			if err := e.g.refusedPayment(txid, err, fmt.Sprintf("Its change, %d sat, was held in the pool until it mined, and is taken out.", sats)); err != nil {
+				return err
+			}
 		case !errors.Is(err, nodeapi.ErrNotMined):
 			e.g.say("change from %s is held: the chain view could not say whether it mined (%v)", txid, err)
 		}
