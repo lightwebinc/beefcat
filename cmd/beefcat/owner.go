@@ -425,7 +425,11 @@ func (e *engine) collect(ctx context.Context) error {
 				}
 				sats += o.Satoshis
 			}
-			if err := e.g.refusedPayment(txid, err, fmt.Sprintf("Its change, %d sat, was held in the pool until it mined, and is taken out.", sats)); err != nil {
+			note := fmt.Sprintf("Its change, %d sat, was held in the pool until it mined, and is taken out.", sats)
+			if tx, terr := proofs.Tx(txid); terr == nil {
+				note += strandedCoins(ctx, e.chain, tx, pool.Outputs())
+			}
+			if err := e.g.refusedPayment(txid, err, note); err != nil {
 				return err
 			}
 		case !errors.Is(err, nodeapi.ErrNotMined):
@@ -433,6 +437,37 @@ func (e *engine) collect(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// strandedCoins says what became of the coins a refused payment tx spent.
+// The run that made it took them from the pool, and a refusal that shows no
+// competing spend leaves them in neither the pool nor, once this run has
+// reported it, anywhere the home records: each is named, with the command
+// that takes it back, unless another transaction spent it. in is the pool.
+func strandedCoins(ctx context.Context, sp interface {
+	Spender(ctx context.Context, txid string, vout uint32) (string, error)
+}, tx *transaction.Transaction, in []bwallet.Output) string {
+	var b strings.Builder
+	for _, input := range tx.Inputs {
+		if input.SourceTXID == nil {
+			continue
+		}
+		id, vout := input.SourceTXID.String(), input.SourceTxOutIndex
+		coin := fmt.Sprintf("%s.%d", id, vout)
+		if slices.ContainsFunc(in, func(o bwallet.Output) bool { return o.Outpoint() == coin }) {
+			continue
+		}
+		by, err := sp.Spender(ctx, id, vout)
+		switch {
+		case err == nil && by != "" && !strings.EqualFold(by, tx.TxID().String()):
+			fmt.Fprintf(&b, " Its input coin %s is spent by %s and is out of the pool.", coin, by)
+		case err != nil:
+			fmt.Fprintf(&b, " Its input coin %s is not in the pool and the chain view could not say whether another transaction spent it (%v): if none has, beefcat fund -n 0 -txid %s takes it back.", coin, err, id)
+		default:
+			fmt.Fprintf(&b, " Its input coin %s is not in the pool and nothing else spent it: beefcat fund -n 0 -txid %s takes it back.", coin, id)
+		}
+	}
+	return b.String()
 }
 
 const fundHelp = `usage: beefcat fund [-n N] [-txid TXID | -beef FILE|-]
@@ -849,13 +884,13 @@ func cmdSweep(ctx context.Context, g *global, args []string) error {
 func (g *global) refusedSweep(tree string, count uint32, tx *transaction.Transaction, err error, earlier bool) {
 	lines := []string{"THE NETWORK REFUSED THE SWEEP: IT RETRACTS NOTHING",
 		fmt.Sprintf("Sweep %s of tree %s: %s", tx.TxID(), tree, strings.TrimPrefix(err.Error(), "sweep: "))}
-	funding := func(outpoint string) bool {
+	isFunding := func(outpoint string) bool {
 		txid, vout, _ := strings.Cut(outpoint, ".")
 		v, perr := strconv.ParseUint(vout, 10, 32)
 		return perr == nil && txid == tree && v < uint64(count)
 	}
 	var se *nodeapi.SpentError
-	if errors.As(err, &se) && funding(se.Outpoint) {
+	if errors.As(err, &se) && isFunding(se.Outpoint) {
 		lines = append(lines, "Funding output "+se.Outpoint+" of the tree is spent by "+se.By+", which only this home's key can sign: another copy of this home spent it. That transaction retracts what the outputs it spends carried once it is mined, and no sweep of every output of the tree can mine beside it.")
 	} else {
 		lines = append(lines, "Until a sweep of the tree is mined, a receiver that checks spends (-unspent) still accepts what its unspent outputs carried. Run beefcat sweep -yes again to sweep it with a new transaction.")
@@ -865,7 +900,7 @@ func (g *global) refusedSweep(tree string, count uint32, tx *transaction.Transac
 			continue
 		}
 		fee := fmt.Sprintf("%s.%d", in.SourceTXID, in.SourceTxOutIndex)
-		if !earlier || funding(fee) {
+		if !earlier || isFunding(fee) {
 			continue
 		}
 		if se != nil && se.Outpoint == fee {

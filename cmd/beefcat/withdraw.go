@@ -189,8 +189,12 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := e.collect(ctx); err != nil {
-		return err
+	// A preview changes nothing: held change is collected, and a refused
+	// payment's notice rewritten, only once -yes is given.
+	if *yes {
+		if err := e.collect(ctx); err != nil {
+			return err
+		}
 	}
 	var largest uint64
 	for _, o := range h.e.Pool.Outputs() {
@@ -214,6 +218,9 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 	}
 	if !*yes {
 		fmt.Fprintf(g.stdout, "would pay %d sat to %s on network %s: %s\nnothing was spent; run again with -yes\n", pay, to, g.cfg.Network, how)
+		if len(h.e.Pool.UnprovenTxids()) > 0 {
+			fmt.Fprintln(g.stdout, "change held from unmined payments is not counted; it is collected with -yes")
+		}
 		return nil
 	}
 	fee, err := e.payer.TakeAtLeast(ctx, need)
@@ -265,7 +272,7 @@ func cmdWithdraw(ctx context.Context, g *global, args []string) error {
 		if back {
 			coin = "The coin it spent is back in the pool."
 		}
-		return errors.Join(errors.New("withdraw: the network refused the payment"), g.refusedPayment(n.Txid, err, "No change from it is booked. "+coin))
+		return errors.Join(errors.New("withdraw: the network refused the payment"), g.refusedPayment(n.Txid, err, "No change from it is booked. "+coin), derr)
 	case err != nil:
 		// Not mined in time, or the chain view could not say: the payment
 		// can still mine, so its change is held (engine.collect).

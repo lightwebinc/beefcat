@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bsv-blockchain/go-sdk/chainhash"
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -401,5 +402,104 @@ func TestRedeliverOfARefusedPaymentIsRefused(t *testing.T) {
 		if !strings.Contains(e, "Payment "+txid+": ") || !strings.Contains(e, "spent by "+other) {
 			t.Fatalf("later %v: the banner does not name the payment and why:\n%s", later, e)
 		}
+	}
+}
+
+// fakeSpender answers Spender from a map keyed by outpoint.
+type fakeSpender map[string]string
+
+func (f fakeSpender) Spender(_ context.Context, txid string, vout uint32) (string, error) {
+	return f[fmt.Sprintf("%s.%d", txid, vout)], nil
+}
+
+// A refused payment whose input coin no other transaction spent leaves the
+// coin in no pool: strandedCoins names it with the command that takes it
+// back, and says nothing of a coin that is in the pool.
+func TestStrandedCoinsNamesTheUnspentInput(t *testing.T) {
+	parent := strings.Repeat("cd", 32)
+	h, err := chainhash.NewHashFromHex(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := transaction.NewTransaction()
+	tx.Inputs = append(tx.Inputs, &transaction.TransactionInput{SourceTXID: h, SourceTxOutIndex: 1})
+	got := strandedCoins(context.Background(), fakeSpender{}, tx, nil)
+	if !strings.Contains(got, parent+".1") || !strings.Contains(got, "beefcat fund -n 0 -txid "+parent) {
+		t.Fatalf("the unspent input is not named with its recovery: %q", got)
+	}
+	if got := strandedCoins(context.Background(), fakeSpender{parent + ".1": other}, tx, nil); !strings.Contains(got, "spent by "+other) || strings.Contains(got, "takes it back") {
+		t.Fatalf("a spent input is offered back: %q", got)
+	}
+	if got := strandedCoins(context.Background(), fakeSpender{}, tx, []bwallet.Output{{TxID: parent, Vout: 1}}); got != "" {
+		t.Fatalf("a coin in the pool is reported stranded: %q", got)
+	}
+}
+
+// The banner of a refusal found by a later command names the payment's
+// input coin, which the run that spent it took from the pool.
+func TestWithdrawRefusedLaterNamesItsInput(t *testing.T) {
+	r := newRig(t, 1)
+	r.chain.SetHold(true)
+	code, o, e := cat(t, nil, "withdraw", "-home", r.home, "-sats", "5000", "-wait", "100ms", "-yes", address(t))
+	if code != 0 {
+		t.Fatalf("withdraw: %d\n%s%s", code, o, e)
+	}
+	txid := txidIn(t, o)
+	in := r.chain.Tx(txid).Inputs[0]
+	spendFirstInput(t, r.chain, txid)
+	_, _, e = cat(t, nil, "fund", "-home", r.home, "-q", "-n", "0")
+	e = loud(t, e, "THE NETWORK REFUSED THE PAYMENT")
+	if want := fmt.Sprintf("Its input coin %s.%d is spent by %s", in.SourceTXID, in.SourceTxOutIndex, other); !strings.Contains(e, want) {
+		t.Fatalf("the banner does not name the input coin, %q:\n%s", want, e)
+	}
+}
+
+// Without -yes withdraw only previews: it does not collect held change,
+// report a refused payment, or rewrite its notice.
+func TestWithdrawPreviewChangesNothing(t *testing.T) {
+	r := newRig(t, 1)
+	r.chain.SetHold(true)
+	code, o, e := cat(t, nil, "withdraw", "-home", r.home, "-sats", "5000", "-wait", "100ms", "-yes", address(t))
+	if code != 0 {
+		t.Fatalf("withdraw: %d\n%s%s", code, o, e)
+	}
+	txid := txidIn(t, o)
+	spendFirstInput(t, r.chain, txid)
+	before := pool(t, r.home)
+	code, o, e = cat(t, nil, "withdraw", "-home", r.home, "-sats", "1000", address(t))
+	if code != 0 || strings.Contains(e, "REFUSED") || !strings.Contains(string(o), "nothing was spent") {
+		t.Fatalf("preview: %d\n%s%s", code, o, e)
+	}
+	if after := pool(t, r.home); len(after) != len(before) {
+		t.Fatalf("the preview changed the pool: %d coin(s), was %d", len(after), len(before))
+	}
+}
+
+// A payment that is refused after its notice failed to deliver reports
+// both.
+func TestWithdrawRefusedKeepsTheDeliveryError(t *testing.T) {
+	r := newRig(t, 1)
+	r.chain.SetHold(true)
+	rk, err := ec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := deliver
+	deliver = func(_ context.Context, _ string, _ wallet.Interface, _ peerpay.Message) error {
+		for _, id := range r.chain.Txids() {
+			if !r.chain.Mined(id) {
+				spendFirstInput(t, r.chain, id)
+			}
+		}
+		return fmt.Errorf("box down")
+	}
+	defer func() { deliver = old }()
+	link := "peerpay:" + hex.EncodeToString(rk.PubKey().Compressed()) + "?url=https%3A%2F%2Fbox.example.com"
+	code, o, e := cat(t, nil, "withdraw", "-home", r.home, "-q", "-sats", "4000", "-wait", "1m", "-yes", link)
+	if code != exitError {
+		t.Fatalf("exit %d\n%s%s", code, o, e)
+	}
+	if !strings.Contains(e, "withdraw: the notice was not delivered") || !strings.Contains(e, "the network refused the payment") {
+		t.Fatalf("the error drops the delivery failure or the refusal:\n%s", e)
 	}
 }
