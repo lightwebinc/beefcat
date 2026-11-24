@@ -70,10 +70,10 @@ linked only into the devchain command. go-sdk brings the others with it,
 and a statically linked binary contains them whether they were asked for
 directly or not.
 
-go-sdk is under the Apache License 2.0 from v1.7.5, the version beefcat
-builds on. Earlier versions were under the Open BSV License Version 5,
+go-sdk is under the Apache License 2.0 from v1.7.5; beefcat builds on
+v1.7.8. Versions before v1.7.5 were under the Open BSV License Version 5,
 whose grant was revocable and limited to the BSV Blockchains; those terms
-do not apply to v1.7.5.
+do not apply from v1.7.5.
 
 The full text of every module's license above is reproduced verbatim in
 LICENSE-THIRD-PARTY, which is GENERATED from what the binaries actually
