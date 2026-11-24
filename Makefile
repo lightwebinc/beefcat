@@ -33,7 +33,7 @@ fmt-check:
 #    later go-sdk would change what beefcat ships without a line changing
 #    here.
 DEPS_DIRECT := github.com/bsv-blockchain/go-sdk github.com/lightwebinc/bcommon github.com/lightwebinc/bcommon/devkit
-DEPS_SDK    := github.com/bsv-blockchain/go-sdk v1.7.5
+DEPS_SDK    := github.com/bsv-blockchain/go-sdk v1.7.8
 
 deps-check:
 	@set -eu; \
